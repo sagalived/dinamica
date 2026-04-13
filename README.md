@@ -1,0 +1,2 @@
+# dinamica
+Dinamica Controle
