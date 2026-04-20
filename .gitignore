@@ -6,3 +6,14 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Large data files - use local sync only
+data/dinamica.db
+data/financeiro.json
+data/receber.json
+data/pedidos.json
+data/itens_pedidos.json
+data/cotacoes_pedidos.json
+data/consolidado.csv
+__pycache__/
+*.pyc
