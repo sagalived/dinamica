@@ -315,7 +315,6 @@ export default function App() {
       return {
         id: f.id || f.numero || f.codigoTitulo || f.documentNumber || 0,
         buildingId: f.idObra || f.codigoObra || f.enterpriseId || f.buildingId || 0,
-        companyId: f.companyId != null ? String(f.companyId) : undefined,
         description: fixText(f.descricao || f.historico || f.tipoDocumento || f.notes || f.observacao || 'Título a Pagar'),
         creditorName: fixText(f.nomeCredor || f.creditorName || f.nomeFantasiaCredor || f.fornecedor || f.credor || 'Credor sem nome'),
         _rawCreditorId: String(f.creditorId || f.debtorId || ''),
