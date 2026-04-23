@@ -1789,13 +1789,45 @@ def api_bootstrap() -> Any:
             building_id = str(item.get("idObra") or item.get("codigoObra") or item.get("enterpriseId") or "")
             building_info = building_map.get(building_id, {})
             company_id = building_info.get("companyId")
+            # Fallback companyId from links[rel=company]
+            if company_id is None:
+                for lnk in (item.get("links") or []):
+                    if lnk.get("rel") == "company" and lnk.get("href"):
+                        try:
+                            company_id = int(lnk["href"].rstrip("/").split("/")[-1])
+                        except Exception:
+                            pass
+                        break
+            # Raw value may be negative for Expense records – keep sign for calc
+            raw_value = float(
+                item.get("value")
+                if item.get("value") is not None
+                else (
+                    item.get("valor")
+                    or item.get("valorSaldo")
+                    or item.get("totalInvoiceAmount")
+                    or item.get("valorTotal")
+                    or item.get("amount")
+                    or 0
+                )
+            )
+            # documentId (e.g. "REC", "NFE", "DEBC", "BOL") + documentNumber form the Tit/Parc column
+            doc_id = item.get("documentId") or ""
+            doc_number = item.get("documentNumber") or ""
+            installment = item.get("installmentNumber")
+            # Extract bank account code from links for filtering
+            bank_account_code = ""
+            for lnk in (item.get("links") or []):
+                if lnk.get("rel") == "bank-account" and lnk.get("href"):
+                    bank_account_code = lnk["href"].rstrip("/").split("/")[-1]
+                    break
             normalized_receivable.append(
                 {
                     "id": item.get("id")
                     or item.get("numero")
                     or item.get("numeroTitulo")
                     or item.get("codigoTitulo")
-                    or item.get("documentNumber")
+                    or doc_number
                     or 0,
                     "companyId": int(company_id) if company_id is not None else None,
                     "buildingId": int(building_id) if building_id.isdigit() else 0,
@@ -1812,15 +1844,10 @@ def api_bootstrap() -> Any:
                     or item.get("notes")
                     or item.get("description")
                     or "Titulo a Receber",
-                    "valor": float(
-                        item.get("value")
-                        or item.get("valor")
-                        or item.get("valorSaldo")
-                        or item.get("totalInvoiceAmount")
-                        or item.get("valorTotal")
-                        or item.get("amount")
-                        or 0
-                    ),
+                    # abs value for Contas a Receber/Pagar tables
+                    "valor": abs(raw_value),
+                    # raw signed value for Fluxo de Caixa (needed to reproduce Sienge PDF exactly)
+                    "rawValue": raw_value,
                     "situacao": str(item.get("situacao") or item.get("status") or "ABERTO").upper(),
                     "nomeCliente": item.get("nomeCliente")
                     or item.get("nomeFantasiaCliente")
@@ -1830,6 +1857,16 @@ def api_bootstrap() -> Any:
                     "nomeObra": building_map.get(building_id, {}).get("name")
                     or building_name_hints.get(building_id)
                     or normalize_building_name(item, building_id),
+                    # Tit/Parc fields
+                    "documentId": doc_id,
+                    "documentNumber": doc_number,
+                    "installmentNumber": installment,
+                    "statementOrigin": item.get("statementOrigin") or "",
+                    "statementType": item.get("statementType") or "",
+                    "billId": item.get("billId"),
+                    "type": item.get("type") or "Income",
+                    # Bank account code for transparency/filtering
+                    "bankAccountCode": bank_account_code,
                 }
             )
 

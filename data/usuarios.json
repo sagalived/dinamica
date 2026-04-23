@@ -853,6 +853,18 @@
   },
   {
     "active": true,
+    "id": "LUIZPAULO",
+    "links": [
+      {
+        "rel": "groups",
+        "href": "https://api.sienge.com.br/dinamicaempreendimentos/public/api/v1/users/luizpaulo/groups"
+      }
+    ],
+    "email": "tecnica10@dinamicaempreendimentos.com",
+    "name": "Luiz Paulo"
+  },
+  {
+    "active": true,
     "id": "LUIZMEDINA",
     "links": [
       {

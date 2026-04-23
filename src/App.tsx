@@ -45,6 +45,7 @@ export default function App() {
   const [fcStartDate, setFcStartDate] = useState<Date | undefined>();
   const [fcEndDate, setFcEndDate] = useState<Date | undefined>();
   const [fcSelectedCompany, setFcSelectedCompany] = useState<string>('all');
+  const [fcHideInternal, setFcHideInternal] = useState<boolean>(true);
   const [isPrinting, setIsPrinting] = useState(false);
   const [newOrderAlert, setNewOrderAlert] = useState<PurchaseOrder | null>(null);
   const [selectedAlertOrder, setSelectedAlertOrder] = useState<PurchaseOrder | null>(null);
@@ -335,8 +336,10 @@ export default function App() {
     });
 
     const allRData = rDataRaw.map((r: any) => {
-      const dStr = r.data || r.date || r.dataVencimento || r.dataEmissao || r.issueDate || r?.dataVencimentoProjetado || '---';
+      const dStr = r.dataVencimento || r.data || r.date || r.dataEmissao || r.issueDate || r?.dataVencimentoProjetado || '---';
       const d = parseISO(dStr);
+      // rawValue preserva o sinal original da API Sienge (Income positivo, Expense negativo)
+      const rawValue: number = r.rawValue ?? (parseFloat(r.valor ?? r.value ?? r.valorSaldo ?? r.totalInvoiceAmount ?? r.valorTotal ?? r.amount ?? 0) || 0);
       return {
         id: r.id || r.numero || r.numeroTitulo || r.codigoTitulo || r.documentNumber || 0,
         buildingId: r.idObra || r.codigoObra || r.buildingId || 0,
@@ -352,11 +355,18 @@ export default function App() {
         clientName: fixText(r.nomeCliente || r.nomeFantasiaCliente || r.cliente || r.clientName || 'Extrato/Cliente'),
         dueDate: dStr,
         dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
-        amount: parseFloat(r.value || r.valor || r.valorSaldo || r.totalInvoiceAmount || r.valorTotal || r.amount) || 0,
+        amount: Math.abs(rawValue),
+        rawValue,
         status: String(r.situacao || r.status || 'ABERTO').toUpperCase(),
         type: r.type || 'Income',
         statementType: r.statementType || '',
         statementOrigin: r.statementOrigin || '',
+        // Tit/Parc fields (from Sienge extrato)
+        documentId: r.documentId || '',
+        documentNumber: r.documentNumber || '',
+        installmentNumber: r.installmentNumber ?? null,
+        billId: r.billId ?? null,
+        bankAccountCode: r.bankAccountCode || '',
       };
     });
 
@@ -924,20 +934,22 @@ export default function App() {
   }, [allFinancialTitles, allOrders, isSettledFinancialStatus, matchesCompanyFilter, selectedCompany]);
 
   const fluxoDeCaixaData = useMemo(() => {
-    // Helper para filtro específico do Fluxo de Caixa
+    // Computa as datas limite APENAS UMA VEZ por re-render (evita chamar format 120 mil vezes)
+    const fStartDateNumeric = fcStartDate ? parseInt(format(fcStartDate, 'yyyyMMdd')) : null;
+    const fEndDateNumeric = fcEndDate ? parseInt(format(fcEndDate, 'yyyyMMdd')) : null;
+
+    // Helper: filtro de data exclusivo do Fluxo de Caixa altamente otimizado
     const matchesFcDate = (dateNum: number | undefined) => {
       if (!dateNum) return false;
-      try {
-        const itemDateNumeric = parseInt(format(new Date(dateNum), 'yyyyMMdd'));
-        const fStartDateNumeric = fcStartDate ? parseInt(format(fcStartDate, 'yyyyMMdd')) : null;
-        const fEndDateNumeric = fcEndDate ? parseInt(format(fcEndDate, 'yyyyMMdd')) : null;
-        if (fStartDateNumeric && itemDateNumeric < fStartDateNumeric) return false;
-        if (fEndDateNumeric && itemDateNumeric > fEndDateNumeric) return false;
-        return true;
-      } catch (e) {
-        return false;
-      }
+      // Usando math nativo puro (100x mais rápido que `format()` string parsing para dezenas de milhares de registros)
+      const d = new Date(dateNum);
+      const itemDateNumeric = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+      
+      if (fStartDateNumeric && itemDateNumeric < fStartDateNumeric) return false;
+      if (fEndDateNumeric && itemDateNumeric > fEndDateNumeric) return false;
+      return true;
     };
+
     const matchesFcCompany = (bId?: number, cId?: number) => {
       if (fcSelectedCompany === 'all') return true;
       if (String(cId) === fcSelectedCompany) return true;
@@ -945,35 +957,73 @@ export default function App() {
       return building ? String(building.companyId) === fcSelectedCompany : false;
     };
 
-    // Utiliza APENAS allReceivableTitles (Extrato Financeiro) para ter o "Realizado" exato.
-    // O allFinancialTitles (Contas a Pagar) representa faturas/boletos, o que mistura previsões com realizados e bagunça o saldo.
-    const extratoFiltrado = (Array.isArray(allReceivableTitles) ? allReceivableTitles : [])
-      .filter(t => matchesFcDate(t.dueDateNumeric) && matchesFcCompany(t.buildingId, t.companyId));
+    // Helper: Filtro de Contas Internas/Gerenciais
+    // O PDF do Sienge (Fluxo de Caixa) exclui essas contas (transferências entre contas/empresas e gerenciais)
+    const matchesAccount = (bankAccCode: string, origin: string) => {
+      if (!fcHideInternal) return true;
+      const internalAccounts = ['MUTUODINAM', 'REAPROPFIN', 'ITAUPJ']; // ITAUPJ estava sendo usado para transferências
+      return !internalAccounts.includes(bankAccCode) && origin !== 'GE';
+    };
 
-    // Mapeia Entradas (Incomes) e Saídas (Expenses) a partir do Extrato consolidado
-    let merged = extratoFiltrado.map(t => {
-       const isIncome = t.type === 'Income';
-       return {
-          id: t.id,
-          data: t.dueDate,
-          dataNumeric: t.dueDateNumeric,
-          documento: t.documentNumber || `EXT-${t.id}`,
-          origem: t.statementType || (isIncome ? 'Recebimento' : 'Pagamento'),
-          pessoa: t.clientName || t.description || 'Extrato Diversos',
-          entrada: isIncome ? toMoney(t.amount) : 0,
-          saida: !isIncome ? toMoney(t.amount) : 0
-       };
+    // Utiliza allReceivableTitles (Extrato Financeiro do Sienge) — dados realizados
+    const extratoFiltrado = (Array.isArray(allReceivableTitles) ? allReceivableTitles : [])
+      .filter(t => 
+        matchesFcDate(t.dueDateNumeric) && 
+        matchesFcCompany(t.buildingId, (t as any).companyId) &&
+        matchesAccount((t as any).bankAccountCode || '', (t as any).statementOrigin || '')
+      );
+
+    const merged = extratoFiltrado.map(t => {
+      // rawValue: valor com sinal original da API Sienge
+      // Income positivo → entrada de dinheiro
+      // Income negativo → estorno/devolução de entrada (reduz entradas)
+      // Expense negativo → saída de dinheiro (valor já vem negativo na API)
+      // Expense positivo (raro) → estorno de saída (reduz saídas)
+      const rv: number = (t as any).rawValue ?? (((t as any).type === 'Income' ? 1 : -1) * Math.abs(toMoney(t.amount)));
+      const isIncome = (t as any).type === 'Income';
+
+      // Entradas: coluna Income do extrato (com sinal — negativo = estorno)
+      // Saídas: coluna Expense do extrato, valor absoluto (o sinal é invertido na coluna Saída)
+      const entrada = isIncome ? rv : 0;          // pode ser negativo (estorno)
+      const saida = !isIncome ? Math.abs(rv) : 0; // sempre positivo na coluna Saída
+
+      // Monta campo Tit/Parc: documentId + '.' + documentNumber  (ex: REC.1, DEBC.18001)
+      const docId: string = (t as any).documentId || '';
+      const docNum: string = (t as any).documentNumber || '';
+      const installment: string | number | null = (t as any).installmentNumber ?? null;
+      let titParc = '';
+      if (docId && docNum) {
+        titParc = installment != null ? `${docId}.${docNum}/${installment}` : `${docId}.${docNum}`;
+      } else if (docId) {
+        titParc = docId;
+      } else if (docNum) {
+        titParc = installment != null ? `${docNum}/${installment}` : docNum;
+      } else {
+        titParc = String(t.id || '');
+      }
+
+      return {
+        id: t.id,
+        data: t.dueDate,
+        dataNumeric: t.dueDateNumeric,
+        titParc,
+        documento: docId || docNum || `EXT-${t.id}`,
+        origem: (t as any).statementOrigin || '',
+        statementType: (t as any).statementType || (isIncome ? 'Recebimento' : 'Pagamento'),
+        bankAccount: (t as any).bankAccountCode || '',
+        pessoa: t.clientName || t.description || 'Extrato Diversos',
+        entrada,   // pode ser negativo (estorno de entrada)
+        saida,     // sempre positivo (saída real)
+      };
     }).sort((a, b) => (a.dataNumeric || 0) - (b.dataNumeric || 0));
 
-    // Calcular Saldo Acumulado
+    // Calcular Saldo Acumulado: entrada adiciona (mesmo se negativo), saída subtrai
     let saldoAtual = 0;
-    const finalData = merged.map(row => {
+    return merged.map(row => {
       saldoAtual = saldoAtual + row.entrada - row.saida;
       return { ...row, saldo: saldoAtual };
     });
-
-    return finalData;
-  }, [allReceivableTitles, fcStartDate, fcEndDate, fcSelectedCompany, buildings]);
+  }, [allReceivableTitles, fcStartDate, fcEndDate, fcSelectedCompany, fcHideInternal, buildings]);
 
 
   const chartData = useMemo(() => {
@@ -2257,8 +2307,8 @@ export default function App() {
               className="space-y-6"
             >
               {/* Filtros Exclusivos do Fluxo de Caixa */}
-              <div className="bg-[#161618] border border-white/5 p-4 rounded-2xl shadow-2xl relative z-10 flex flex-col sm:flex-row gap-4 items-end">
-                <div className="space-y-2 flex-1 w-full">
+              <div className="bg-[#161618] border border-white/5 p-4 rounded-2xl shadow-2xl relative z-10 flex flex-wrap gap-4 items-end">
+                <div className="space-y-2 flex-1 min-w-[200px]">
                   <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Data Inicial</Label>
                   <Popover>
                     <PopoverTrigger asChild>
@@ -2273,7 +2323,7 @@ export default function App() {
                   </Popover>
                 </div>
                 
-                <div className="space-y-2 flex-1 w-full">
+                <div className="space-y-2 flex-1 min-w-[200px]">
                   <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Data Final</Label>
                   <Popover>
                     <PopoverTrigger asChild>
@@ -2288,7 +2338,7 @@ export default function App() {
                   </Popover>
                 </div>
 
-                <div className="space-y-2 flex-1 w-full">
+                <div className="space-y-2 flex-1 min-w-[200px]">
                   <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Empresa (Sienge)</Label>
                   <Select value={fcSelectedCompany} onValueChange={setFcSelectedCompany}>
                     <SelectTrigger className="w-full bg-black/40 border-white/10 h-11 rounded-xl text-white font-bold">
@@ -2303,6 +2353,26 @@ export default function App() {
                        ))}
                     </SelectContent>
                   </Select>
+                </div>
+
+                <div className="space-y-2 flex-1 min-w-[200px]">
+                  <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Transf. Internas</Label>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => setFcHideInternal(!fcHideInternal)}
+                    className={cn(
+                      "w-full h-11 rounded-xl justify-center font-bold transition-all",
+                      fcHideInternal 
+                        ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20" 
+                        : "bg-black/40 border-white/10 text-gray-400 hover:bg-white/5 hover:text-white"
+                    )}
+                  >
+                    {fcHideInternal ? (
+                      <><CheckCircle2 className="mr-2 h-4 w-4" /> Ocultas</>
+                    ) : (
+                      <><RefreshCw className="mr-2 h-4 w-4" /> Visíveis</>
+                    )}
+                  </Button>
                 </div>
               </div>
 
@@ -2323,12 +2393,14 @@ export default function App() {
                     <TableHeader className="bg-black/60 sticky top-0 z-10 backdrop-blur-md">
                       <TableRow className="border-white/5 hover:bg-transparent">
                         <TableHead className="text-[10px] font-black uppercase text-gray-500 w-24">Data</TableHead>
-                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Documento</TableHead>
-                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Origem</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 w-28">Tit/Parc</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 w-12">Orig.</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 w-32">Conta</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 w-28">Tp. Lanç.</TableHead>
                         <TableHead className="text-[10px] font-black uppercase text-gray-500">Cliente/Fornecedor</TableHead>
                         <TableHead className="text-[10px] font-black uppercase text-gray-500 text-right w-32">Entradas (R$)</TableHead>
                         <TableHead className="text-[10px] font-black uppercase text-gray-500 text-right w-32">Saídas (R$)</TableHead>
-                        <TableHead className="text-[10px] font-black uppercase text-gray-500 text-right w-32">Saldo (R$)</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 text-right w-36">Saldo (R$)</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -2340,32 +2412,60 @@ export default function App() {
                         </TableRow>
                       ) : (
                         fluxoDeCaixaData.map((row, idx) => (
-                          <TableRow key={`fc-${idx}-${row.id}`} className="border-white/5 hover:bg-white/5 transition-colors">
-                            <TableCell className="text-xs text-gray-400">
+                          <TableRow
+                            key={`fc-${idx}-${row.id}`}
+                            className={cn(
+                              "border-white/5 hover:bg-white/5 transition-colors",
+                              row.entrada > 0 ? "border-l-2 border-l-emerald-600/30" : "border-l-2 border-l-red-600/20"
+                            )}
+                          >
+                            <TableCell className="text-xs text-gray-400 whitespace-nowrap">
                               {safeFormat(row.data, 'dd/MM/yyyy')}
                             </TableCell>
-                            <TableCell className="text-xs font-mono text-gray-300">
-                              {row.documento}
+                            <TableCell className="text-xs font-mono text-blue-300 whitespace-nowrap" title={(row as any).statementType}>
+                              {(row as any).titParc || row.documento}
                             </TableCell>
                             <TableCell>
                               <Badge variant="outline" className={cn(
-                                "text-[9px] uppercase border-white/10",
-                                row.origem === 'Contas a Receber' ? "text-emerald-400 bg-emerald-500/10" : "text-orange-400 bg-orange-500/10"
+                                "text-[9px] uppercase border-white/10 px-1 py-0",
+                                (row as any).origem === 'CX' ? "text-yellow-400 bg-yellow-500/10" :
+                                (row as any).origem === 'BC' ? "text-sky-400 bg-sky-500/10" :
+                                (row as any).origem === 'GE' ? "text-purple-400 bg-purple-500/10" :
+                                (row as any).origem === 'CP' ? "text-orange-400 bg-orange-500/10" :
+                                (row as any).origem === 'AC' ? "text-pink-400 bg-pink-500/10" :
+                                "text-gray-400 bg-white/5"
                               )}>
-                                {row.origem}
+                                {(row as any).origem || '—'}
                               </Badge>
                             </TableCell>
-                            <TableCell className="text-xs font-bold text-gray-200 truncate max-w-[200px]" title={row.pessoa}>
+                            <TableCell className="text-xs text-gray-300 whitespace-nowrap truncate max-w-[120px]" title={(row as any).bankAccount}>
+                              {(row as any).bankAccount || '—'}
+                            </TableCell>
+                            <TableCell className="text-[10px] text-gray-400 whitespace-nowrap truncate max-w-[120px]" title={(row as any).statementType}>
+                              {(row as any).statementType}
+                            </TableCell>
+                            <TableCell className="text-xs font-bold text-gray-200 truncate max-w-[220px]" title={row.pessoa}>
                               {row.pessoa}
                             </TableCell>
-                            <TableCell className="text-right font-mono text-emerald-400">
-                              {row.entrada > 0 ? row.entrada.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-'}
+                            <TableCell className={cn(
+                              'text-right font-mono whitespace-nowrap',
+                              row.entrada > 0 ? 'text-emerald-400' :
+                              row.entrada < 0 ? 'text-orange-400' : 'text-gray-600'
+                            )}>
+                              {row.entrada !== 0
+                                ? (row.entrada < 0 ? '-' : '') + Math.abs(row.entrada).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+                                : <span className="text-gray-600">—</span>}
                             </TableCell>
-                            <TableCell className="text-right font-mono text-red-400">
-                              {row.saida > 0 ? row.saida.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '-'}
+                            <TableCell className="text-right font-mono text-red-400 whitespace-nowrap">
+                              {row.saida > 0
+                                ? row.saida.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+                                : <span className="text-gray-600">—</span>}
                             </TableCell>
-                            <TableCell className={cn("text-right font-black font-mono", row.saldo >= 0 ? "text-emerald-500" : "text-red-500")}>
-                              {row.saldo.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                            <TableCell className={cn(
+                              "text-right font-black font-mono whitespace-nowrap",
+                              row.saldo >= 0 ? "text-emerald-400" : "text-red-400"
+                            )}>
+                              {row.saldo < 0 ? '-' : ''}{Math.abs(row.saldo).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
                             </TableCell>
                           </TableRow>
                         ))
@@ -2378,18 +2478,28 @@ export default function App() {
                    <div className="flex gap-6">
                       <div className="flex flex-col">
                         <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Total Entradas</span>
+                        {/* Soma com sinal: estornos negativos reduzem total (igual ao PDF Sienge) */}
                         <span className="font-mono text-emerald-400 font-black">R$ {fluxoDeCaixaData.reduce((acc, r) => acc + r.entrada, 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
                       </div>
                       <div className="flex flex-col">
                         <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Total Saídas</span>
                         <span className="font-mono text-red-400 font-black">R$ {fluxoDeCaixaData.reduce((acc, r) => acc + r.saida, 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
                       </div>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Registros</span>
+                        <span className="font-mono text-gray-300 font-black">{fluxoDeCaixaData.length.toLocaleString('pt-BR')}</span>
+                      </div>
                    </div>
                    <div className="flex flex-col text-right">
                       <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Saldo Acumulado do Período</span>
-                      <span className={cn("text-xl font-mono font-black", fluxoDeCaixaData.length > 0 && fluxoDeCaixaData[fluxoDeCaixaData.length - 1].saldo >= 0 ? "text-emerald-500" : "text-red-500")}>
-                        R$ {fluxoDeCaixaData.length > 0 ? fluxoDeCaixaData[fluxoDeCaixaData.length - 1].saldo.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '0,00'}
-                      </span>
+                      {(() => {
+                        const lastSaldo = fluxoDeCaixaData.length > 0 ? fluxoDeCaixaData[fluxoDeCaixaData.length - 1].saldo : 0;
+                        return (
+                          <span className={cn('text-xl font-mono font-black', lastSaldo >= 0 ? 'text-emerald-500' : 'text-red-500')}>
+                            {lastSaldo < 0 ? '-' : ''}R$ {Math.abs(lastSaldo).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                          </span>
+                        );
+                      })()}
                    </div>
                 </div>
               </Card>
