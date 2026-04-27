@@ -1,4 +1,6 @@
 from typing import Any
+from datetime import datetime
+import threading
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -8,10 +10,22 @@ from backend.database import get_db
 from backend.dependencies import get_current_user
 from backend.models import AppUser, Building, Company, Creditor, DirectoryUser
 from backend.schemas import BootstrapResponse, FetchItemsRequest, FetchQuotationsRequest
-from backend.services.sienge_cache import read_json_cache, read_sync_metadata, utc_now_iso, write_json_cache, write_sync_metadata
+from backend.services.sienge_cache import utc_now_iso
 from backend.services.sienge_client import sienge_client
+from backend.services.sienge_storage import (
+    read_snapshot,
+    read_sync_metadata,
+    write_snapshot,
+    write_sync_metadata,
+)
 
 router = APIRouter(prefix="/api/sienge", tags=["sienge"])
+_SYNC_LOCK = threading.Lock()
+_SYNC_STATE: dict[str, Any] = {
+    "running": False,
+    "source": None,
+    "started_at": None,
+}
 
 
 def _to_array(payload: Any) -> list[dict]:
@@ -33,23 +47,23 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
-def _read_cached_dataset(filename: str, default: Any) -> Any:
-    return read_json_cache(filename, default=default)
+def _read_cached_dataset(db: Session, filename: str, default: Any) -> Any:
+    return read_snapshot(db, filename, default=default)
 
 
-def _write_cached_dataset(filename: str, payload: Any) -> None:
-    write_json_cache(filename, payload)
+def _write_cached_dataset(db: Session, filename: str, payload: Any) -> None:
+    write_snapshot(db, filename, payload)
 
 
-def _cache_counts() -> dict[str, int]:
+def _cache_counts(db: Session) -> dict[str, int]:
     return {
-        "obras": len(_to_array(_read_cached_dataset("obras.json", []))),
-        "usuarios": len(_to_array(_read_cached_dataset("usuarios.json", []))),
-        "credores": len(_to_array(_read_cached_dataset("credores.json", []))),
-        "empresas": len(_to_array(_read_cached_dataset("empresas.json", []))),
-        "pedidos": len(_to_array(_read_cached_dataset("pedidos.json", []))),
-        "financeiro": len(_to_array(_read_cached_dataset("financeiro.json", []))),
-        "receber": len(_to_array(_read_cached_dataset("receber.json", []))),
+        "obras": len(_to_array(_read_cached_dataset(db, "obras.json", []))),
+        "usuarios": len(_to_array(_read_cached_dataset(db, "usuarios.json", []))),
+        "credores": len(_to_array(_read_cached_dataset(db, "credores.json", []))),
+        "empresas": len(_to_array(_read_cached_dataset(db, "empresas.json", []))),
+        "pedidos": len(_to_array(_read_cached_dataset(db, "pedidos.json", []))),
+        "financeiro": len(_to_array(_read_cached_dataset(db, "financeiro.json", []))),
+        "receber": len(_to_array(_read_cached_dataset(db, "receber.json", []))),
     }
 
 
@@ -121,15 +135,58 @@ def _extract_company_id_from_links(links: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _to_date_number(value: Any) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return 0
+    try:
+        return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() * 1000)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d/%m/%Y"):
+        try:
+            return int(datetime.strptime(raw[:19], fmt).timestamp() * 1000)
+        except ValueError:
+            continue
+    return 0
+
+
+def _in_range(date_number: int, start_ms: int | None, end_exclusive_ms: int | None) -> bool:
+    if start_ms is None and end_exclusive_ms is None:
+        return True
+    if not date_number:
+        return False
+    if start_ms is not None and date_number < start_ms:
+        return False
+    if end_exclusive_ms is not None and date_number >= end_exclusive_ms:
+        return False
+    return True
+
+
+def _date_start_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    return _to_date_number(value)
+
+
+def _date_end_exclusive_ms(value: str | None) -> int | None:
+    if not value:
+        return None
+    base = _to_date_number(value)
+    if base == 0:
+        return None
+    return base + 24 * 60 * 60 * 1000
+
+
 def _legacy_bootstrap_payload(db: Session) -> dict[str, Any]:
-    obras = _to_array(_read_cached_dataset("obras.json", []))
-    usuarios = _to_array(_read_cached_dataset("usuarios.json", []))
-    credores = _to_array(_read_cached_dataset("credores.json", []))
-    companies = _to_array(_read_cached_dataset("empresas.json", []))
-    pedidos = _to_array(_read_cached_dataset("pedidos.json", []))
-    financeiro = _to_array(_read_cached_dataset("financeiro.json", []))
-    receber = _to_array(_read_cached_dataset("receber.json", []))
-    itens_pedidos = _read_cached_dataset("itens_pedidos.json", {}) or {}
+    obras = _to_array(_read_cached_dataset(db, "obras.json", []))
+    usuarios = _to_array(_read_cached_dataset(db, "usuarios.json", []))
+    credores = _to_array(_read_cached_dataset(db, "credores.json", []))
+    companies = _to_array(_read_cached_dataset(db, "empresas.json", []))
+    pedidos = _to_array(_read_cached_dataset(db, "pedidos.json", []))
+    financeiro = _to_array(_read_cached_dataset(db, "financeiro.json", []))
+    receber = _to_array(_read_cached_dataset(db, "receber.json", []))
+    itens_pedidos = _read_cached_dataset(db, "itens_pedidos.json", {}) or {}
 
     if not obras:
         obras = [
@@ -325,7 +382,7 @@ def _legacy_bootstrap_payload(db: Session) -> dict[str, Any]:
         "receber": normalized_receivable,
         "itensPedidos": {str(key): value for key, value in itens_pedidos.items()},
         "saldoBancario": saldo_bancario,
-        "latestSync": read_sync_metadata(),
+        "latestSync": read_sync_metadata(db),
     }
 
 
@@ -338,7 +395,44 @@ def _normalize_response_payload(payload: dict[str, Any], db: Session) -> Bootstr
     return BootstrapResponse(**normalized)
 
 
-async def _perform_sync() -> dict[str, Any]:
+def get_sync_state() -> dict[str, Any]:
+    return {
+        "running": bool(_SYNC_STATE.get("running")),
+        "source": _SYNC_STATE.get("source"),
+        "started_at": _SYNC_STATE.get("started_at"),
+    }
+
+
+async def run_sync_once(db: Session, source: str = "manual") -> dict[str, Any]:
+    acquired = _SYNC_LOCK.acquire(blocking=False)
+    if not acquired:
+        latest_sync = read_sync_metadata(db) or {}
+        return {
+            "latestSync": latest_sync,
+            "itensPedidos": _read_cached_dataset(db, "itens_pedidos.json", {}) or {},
+            "synced": False,
+            "source": latest_sync.get("source") or "cache",
+            "in_progress": True,
+            "message": "Sincronizacao ja em andamento.",
+        }
+
+    _SYNC_STATE["running"] = True
+    _SYNC_STATE["source"] = source
+    _SYNC_STATE["started_at"] = utc_now_iso()
+
+    try:
+        payload = await _perform_sync(db)
+        payload["in_progress"] = False
+        payload["message"] = (payload.get("latestSync") or {}).get("message")
+        return payload
+    finally:
+        _SYNC_STATE["running"] = False
+        _SYNC_STATE["source"] = None
+        _SYNC_STATE["started_at"] = None
+        _SYNC_LOCK.release()
+
+
+async def _perform_sync(db: Session) -> dict[str, Any]:
     started_at = utc_now_iso()
 
     obras = await sienge_client.fetch_obras()
@@ -351,32 +445,48 @@ async def _perform_sync() -> dict[str, Any]:
     itens_pedidos = await sienge_client.fetch_itens_pedidos()
 
     if not any([obras, usuarios, empresas, credores, pedidos, financeiro, receber, itens_pedidos]):
+        cached_counts = _cache_counts(db)
+        has_cache = any(cached_counts.values())
+        diagnostic = sienge_client.last_error or {}
+        status_code = diagnostic.get("status_code")
+        reason = "SIENGE indisponível"
+        if status_code == 401:
+            reason = "SIENGE retornou 401 (credenciais inválidas/expiradas)"
+
         metadata = {
-            "status": "error",
+            "status": "degraded" if has_cache else "error",
             "started_at": started_at,
             "finished_at": utc_now_iso(),
-            "message": "Sienge did not return any dataset",
-            "counts": _cache_counts(),
+            "message": (
+                f"{reason}. Usando cache local." if has_cache else f"{reason}. Cache local vazio."
+            ),
+            "counts": cached_counts,
+            "source": "cache" if has_cache else "none",
         }
-        write_sync_metadata(metadata)
-        raise HTTPException(status_code=502, detail="Falha na sincronização com o Sienge: nenhum dado retornado.")
+        write_sync_metadata(db, metadata)
+        return {
+            "latestSync": metadata,
+            "itensPedidos": _read_cached_dataset(db, "itens_pedidos.json", {}) or {},
+            "synced": False,
+            "source": metadata["source"],
+        }
 
     if obras:
-        _write_cached_dataset("obras.json", obras)
+        _write_cached_dataset(db, "obras.json", obras)
     if usuarios:
-        _write_cached_dataset("usuarios.json", usuarios)
+        _write_cached_dataset(db, "usuarios.json", usuarios)
     if empresas:
-        _write_cached_dataset("empresas.json", empresas)
+        _write_cached_dataset(db, "empresas.json", empresas)
     if credores:
-        _write_cached_dataset("credores.json", credores)
+        _write_cached_dataset(db, "credores.json", credores)
     if pedidos:
-        _write_cached_dataset("pedidos.json", pedidos)
+        _write_cached_dataset(db, "pedidos.json", pedidos)
     if financeiro:
-        _write_cached_dataset("financeiro.json", financeiro)
+        _write_cached_dataset(db, "financeiro.json", financeiro)
     if receber:
-        _write_cached_dataset("receber.json", receber)
+        _write_cached_dataset(db, "receber.json", receber)
     if itens_pedidos:
-        _write_cached_dataset("itens_pedidos.json", itens_pedidos)
+        _write_cached_dataset(db, "itens_pedidos.json", itens_pedidos)
 
     metadata = {
         "status": "success",
@@ -394,11 +504,13 @@ async def _perform_sync() -> dict[str, Any]:
             "itensPedidos": len(itens_pedidos),
         },
     }
-    write_sync_metadata(metadata)
+    write_sync_metadata(db, metadata)
 
     return {
         "latestSync": metadata,
         "itensPedidos": {str(key): value for key, value in itens_pedidos.items()},
+        "synced": True,
+        "source": "sienge_live",
     }
 
 
@@ -406,23 +518,31 @@ async def _perform_sync() -> dict[str, Any]:
 async def test_connection(db: Session = Depends(get_db)) -> dict[str, Any]:
     try:
         _ = db.scalar(select(Company).limit(1))
-        sienge_status = await sienge_client.test_connection()
-        counts = _cache_counts()
+        counts = _cache_counts(db)
         has_cache = any(counts.values())
-        live = sienge_status.get("live", {"ok": False})
+        latest_sync = read_sync_metadata(db) or {}
+        sync_status = str(latest_sync.get("status") or "unknown")
+        live_ok = sync_status == "success"
+        live = {
+            "ok": live_ok,
+            "status": sync_status,
+            "message": latest_sync.get("message") or "Sem sincronizacao recente.",
+        }
         return {
-            "ok": bool(live.get("ok")) or has_cache,
+            "ok": live_ok or has_cache,
             "live": live,
             "cache": counts,
-            "latestSync": read_sync_metadata(),
+            "latestSync": latest_sync,
+            "syncState": get_sync_state(),
             "database": {"ok": True},
         }
     except Exception as e:
         return {
             "ok": False,
             "live": {"ok": False, "error": str(e)},
-            "cache": _cache_counts(),
-            "latestSync": read_sync_metadata(),
+            "cache": _cache_counts(db),
+            "latestSync": read_sync_metadata(db),
+            "syncState": get_sync_state(),
             "database": {"ok": False, "error": str(e)},
         }
 
@@ -432,12 +552,7 @@ async def bootstrap(
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> BootstrapResponse:
-    counts = _cache_counts()
-    if not any(counts.values()):
-        try:
-            await _perform_sync()
-        except HTTPException:
-            pass
+    # Bootstrap precisa ser leve e sempre servir do cache compartilhado.
     return _normalize_response_payload({}, db)
 
 
@@ -446,13 +561,131 @@ async def sync(
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    payload = await _perform_sync()
+    payload = await run_sync_once(db, source="manual")
+    latest_sync = payload.get("latestSync", {})
+    synced = bool(payload.get("synced", False))
+    in_progress = bool(payload.get("in_progress", False))
+    degraded = latest_sync.get("status") == "degraded"
     return {
-        "status": "ok",
-        "message": "Sync completed from Sienge API",
-        "synced": True,
-        "latestSync": payload["latestSync"],
-        "data": payload["latestSync"]["counts"],
+        "status": "in_progress" if in_progress else ("ok" if synced else ("degraded" if degraded else "error")),
+        "message": (
+            payload.get("message")
+            or latest_sync.get("message")
+            or ("Sync completed from Sienge API" if synced else "Sync executado com fallback")
+        ),
+        "synced": synced,
+        "in_progress": in_progress,
+        "syncState": get_sync_state(),
+        "source": payload.get("source", "unknown"),
+        "latestSync": latest_sync,
+        "data": latest_sync.get("counts", {}),
+    }
+
+
+@router.get("/filtered")
+async def filtered_data(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    company_id: str = "all",
+    user_id: str = "all",
+    requester_id: str = "all",
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    payload = _legacy_bootstrap_payload(db)
+
+    obras = _to_array(payload.get("obras", []))
+    pedidos = _to_array(payload.get("pedidos", []))
+    financeiro = _to_array(payload.get("financeiro", []))
+    receber = _to_array(payload.get("receber", []))
+
+    building_company_map: dict[str, str] = {}
+    for obra in obras:
+        bid = str(obra.get("id") or obra.get("code") or obra.get("codigoVisivel") or "")
+        cid = str(obra.get("companyId") or obra.get("idCompany") or "")
+        if bid and cid:
+            building_company_map[bid] = cid
+
+    start_ms = _date_start_ms(start_date)
+    end_exclusive_ms = _date_end_exclusive_ms(end_date)
+
+    def order_company(order: dict[str, Any]) -> str:
+        direct = order.get("companyId")
+        if direct is not None and str(direct) not in {"", "None", "undefined"}:
+            return str(direct)
+        bid = str(order.get("buildingId") or order.get("idObra") or order.get("codigoVisivelObra") or "")
+        return building_company_map.get(bid, "")
+
+    filtered_orders = []
+    for order in pedidos:
+        date_numeric = _to_date_number(order.get("date") or order.get("dataEmissao"))
+        if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+            continue
+        if company_id != "all" and order_company(order) != company_id:
+            continue
+        if user_id != "all" and str(order.get("buyerId") or order.get("idComprador") or "") != user_id:
+            continue
+        if requester_id != "all" and str(order.get("requesterId") or order.get("solicitante") or "") != requester_id:
+            continue
+        filtered_orders.append(order)
+
+    def financial_company(item: dict[str, Any]) -> str:
+        direct = item.get("companyId")
+        if direct is not None and str(direct) not in {"", "None", "undefined"}:
+            return str(direct)
+        bid = str(item.get("buildingId") or item.get("idObra") or item.get("codigoObra") or "")
+        return building_company_map.get(bid, "")
+
+    filtered_financial = []
+    for item in financeiro:
+        date_numeric = _to_date_number(
+            item.get("dataVencimento")
+            or item.get("dueDate")
+            or item.get("issueDate")
+            or item.get("dataVencimentoProjetado")
+            or item.get("dataEmissao")
+            or item.get("dataContabil")
+        )
+        if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+            continue
+        if company_id != "all" and financial_company(item) != company_id:
+            continue
+        filtered_financial.append(item)
+
+    filtered_receber = []
+    for item in receber:
+        date_numeric = _to_date_number(
+            item.get("dataVencimento")
+            or item.get("dueDate")
+            or item.get("data")
+            or item.get("date")
+            or item.get("dataEmissao")
+            or item.get("issueDate")
+            or item.get("dataVencimentoProjetado")
+        )
+        if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+            continue
+        if company_id != "all" and financial_company(item) != company_id:
+            continue
+        filtered_receber.append(item)
+
+    return {
+        "pedidos": filtered_orders,
+        "financeiro": filtered_financial,
+        "receber": filtered_receber,
+        "latestSync": payload.get("latestSync"),
+        "filters": {
+            "start_date": start_date,
+            "end_date": end_date,
+            "company_id": company_id,
+            "user_id": user_id,
+            "requester_id": requester_id,
+        },
+        "counts": {
+            "pedidos": len(filtered_orders),
+            "financeiro": len(filtered_financial),
+            "receber": len(filtered_receber),
+        },
     }
 
 
@@ -463,7 +696,7 @@ async def fetch_items(
     db: Session = Depends(get_db),
 ) -> dict[str, list[dict]]:
     try:
-        items_map = _read_cached_dataset("itens_pedidos.json", {}) or {}
+        items_map = _read_cached_dataset(db, "itens_pedidos.json", {}) or {}
         changed = False
         requested_ids = {str(order_id) for order_id in payload.ids}
 
@@ -477,7 +710,7 @@ async def fetch_items(
                 changed = True
 
         if changed:
-            _write_cached_dataset("itens_pedidos.json", items_map)
+            _write_cached_dataset(db, "itens_pedidos.json", items_map)
 
         return {str(key): value for key, value in items_map.items() if str(key) in requested_ids}
     except Exception as e:
@@ -492,9 +725,9 @@ async def fetch_quotations(
 ) -> dict[str, Any]:
     try:
         target_ids = {str(order_id) for order_id in payload.ids}
-        quotations_map = _read_cached_dataset("cotacoes_pedidos.json", {}) or {}
-        items_map = _read_cached_dataset("itens_pedidos.json", {}) or {}
-        pedidos = _to_array(_read_cached_dataset("pedidos.json", []))
+        quotations_map = _read_cached_dataset(db, "cotacoes_pedidos.json", {}) or {}
+        items_map = _read_cached_dataset(db, "itens_pedidos.json", {}) or {}
+        pedidos = _to_array(_read_cached_dataset(db, "pedidos.json", []))
         pedido_lookup = {
             str(item.get("id") or item.get("numero")): item
             for item in pedidos
@@ -597,8 +830,8 @@ async def fetch_quotations(
             changed = True
 
         if changed:
-            _write_cached_dataset("itens_pedidos.json", items_map)
-            _write_cached_dataset("cotacoes_pedidos.json", quotations_map)
+            _write_cached_dataset(db, "itens_pedidos.json", items_map)
+            _write_cached_dataset(db, "cotacoes_pedidos.json", quotations_map)
 
         return {key: value for key, value in quotations_map.items() if key in target_ids}
     except Exception as e:

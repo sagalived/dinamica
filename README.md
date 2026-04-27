@@ -1,14 +1,18 @@
 # Dinamica
 
-Projeto migrado para a stack:
+Projeto consolidado em stack Python:
 
-- `FastAPI` para a API
-- `Pandas` para analytics e resumos
-- `Flet` para interface mobile/web
-- `JWT + Bcrypt` para autenticacao
-- `PostgreSQL` para persistencia
+- `Flet` para a interface Web, Desktop e Mobile
+- `FastAPI` para API e integracoes externas
+- `SQLAlchemy + PostgreSQL` para persistencia
+- `Pandas` para analytics
+- `Google GenAI (Python SDK)` para IA no fluxo Python
 
-Os JSONs existentes em `data/` sao usados como carga inicial do banco na primeira subida.
+## O que mudou
+
+- A interface antiga em `React + Tailwind + Recharts + Lucide` foi removida da raiz.
+- O stack legado foi removido para evitar conflito de watchers e processos locais.
+- O layout operacional foi recriado no [flet_app.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/flet_app.py).
 
 ## Rodar localmente
 
@@ -35,11 +39,3 @@ Credencial inicial:
 
 - Email: `admin@dinamica.com`
 - Senha: `admin`
-
-## Principais arquivos
-
-- [app.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/app.py)
-- [backend/main.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/backend/main.py)
-- [backend/services/bootstrap.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/backend/services/bootstrap.py)
-- [backend/services/analytics.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/backend/services/analytics.py)
-- [flet_app.py](/c:/Users/dinam/OneDrive/Documentos/GitHub/Dinamica/flet_app.py)

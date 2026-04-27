@@ -21,3 +21,4 @@ DATABASE_URL = os.getenv(
 JWT_SECRET = os.getenv("JWT_SECRET", "change-this-secret-in-production")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))
+SIENGE_SYNC_INTERVAL_MINUTES = int(os.getenv("SIENGE_SYNC_INTERVAL_MINUTES", "20"))

@@ -1,3 +1,7 @@
+import asyncio
+import logging
+import threading
+
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import SQLAlchemyError
@@ -8,17 +12,19 @@ from dotenv import load_dotenv
 # Load environment variables from .env
 load_dotenv()
 
-from backend.config import APP_NAME
-from backend.database import Base, engine, get_db
+from backend.config import APP_NAME, SIENGE_SYNC_INTERVAL_MINUTES
+from backend.database import Base, engine, get_db, SessionLocal
 from backend.models import AppUser, Building, Client, Company, Creditor, DirectoryUser
 from backend.schemas import AuthResponse, DashboardSummary, LoginRequest, RegisterRequest, UserResponse
 from backend.security import create_access_token, decode_access_token, hash_password, verify_password
 from backend.services.analytics import build_dashboard_summary
 from backend.services.bootstrap import ensure_seed_data
 from backend.routers import sienge, kanban, logistics
+from backend.routers.sienge import run_sync_once
 from backend.dependencies import get_current_user
 
 app = FastAPI(title=APP_NAME, version="2.0.0")
+logger = logging.getLogger(__name__)
 
 # Register routers
 app.include_router(sienge.router)
@@ -34,17 +40,63 @@ app.add_middleware(
 )
 
 
+async def _run_sienge_scheduler() -> None:
+    interval_seconds = max(1, SIENGE_SYNC_INTERVAL_MINUTES) * 60
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            threading.Thread(
+                target=_run_sienge_sync_blocking,
+                args=("scheduler",),
+                daemon=True,
+            ).start()
+        except Exception as exc:
+            logger.warning("SIENGE auto-sync falhou: %s", exc)
+
+
+def _run_sienge_sync_blocking(source: str) -> None:
+    try:
+        with SessionLocal() as db:
+            result = asyncio.run(run_sync_once(db, source=source))
+            if result.get("in_progress"):
+                logger.info("SIENGE sync ignorado (%s): sincronizacao ja em andamento.", source)
+                return
+        logger.info("SIENGE %s sync concluido.", source)
+    except Exception as exc:
+        logger.warning("SIENGE %s sync falhou: %s", source, exc)
+
+
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     app.state.database_ready = False
     app.state.database_error = None
+    app.state.sienge_scheduler_task = None
     try:
         Base.metadata.create_all(bind=engine)
         with Session(engine) as db:
             ensure_seed_data(db)
         app.state.database_ready = True
+
+        # Nao bloquear o startup: sync inicial roda em background.
+        threading.Thread(
+            target=_run_sienge_sync_blocking,
+            args=("startup",),
+            daemon=True,
+        ).start()
+        app.state.sienge_scheduler_task = asyncio.create_task(_run_sienge_scheduler())
     except SQLAlchemyError as exc:
         app.state.database_error = str(exc)
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    scheduler_task = getattr(app.state, "sienge_scheduler_task", None)
+    if scheduler_task is not None:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
 
 
 def require_database_ready() -> None:

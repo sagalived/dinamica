@@ -4,7 +4,7 @@ import {
   DollarSign, Package, Calendar as CalendarIcon, RefreshCw, 
   User as UserIcon, Building2, ChevronRight, Search, Map as MapIcon,
   Wifi, WifiOff, CheckCircle2, AlertCircle, FileText, Printer, X,
-  Menu, ChevronDown, SlidersHorizontal, Truck, LogOut
+  Menu, ChevronDown, SlidersHorizontal, Truck, LogOut, Moon, Sun
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { LogisticsTab } from './components/LogisticsTab';
@@ -21,7 +21,7 @@ import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Calendar } from '@/components/ui/calendar';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { parseISO, format, addDays } from 'date-fns';
+import { parseISO, format, addDays, addMonths } from 'date-fns';
 import { ptBR } from 'date-fns/locale';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, 
@@ -30,6 +30,8 @@ import {
 import { sienge as api, kanbanApi, Building, User, Creditor, PurchaseOrder, PriceAlert, type AuthUser } from './lib/api';
 import { cn } from './lib/utils';
 import { fixText } from './lib/text';
+import logoWordmark from './assets/dinamica-wordmark.svg';
+import logoWordmarkDark from './assets/dinamica-wordmark-dark.svg';
 
 export default function App() {
   type SyncInfo = {
@@ -40,7 +42,28 @@ export default function App() {
     counts?: Record<string, number>;
   } | null;
 
+  type SprintOverview = {
+    id: number;
+    buildingId: number;
+    buildingName: string;
+    name: string;
+    startDate?: string | null;
+    endDate?: string | null;
+    color?: string;
+    overdue: boolean;
+    stats: {
+      totalCards: number;
+      openCards: number;
+      overdueCards: number;
+    };
+  };
+
   const [sessionUser, setSessionUser] = useState<AuthUser | null>(null);
+  type ThemeMode = 'light' | 'dark';
+  const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
+    const stored = localStorage.getItem('dinamica_theme');
+    return stored === 'light' || stored === 'dark' ? stored : 'dark';
+  });
   const [authReady, setAuthReady] = useState(false);
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [loading, setLoading] = useState(false);
@@ -50,9 +73,10 @@ export default function App() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [syncInfo, setSyncInfo] = useState<SyncInfo>(null);
   const [startDate, setStartDate] = useState<Date | undefined>();
-  const [endDate, setEndDate] = useState<Date | undefined>(new Date());
+  const [endDate, setEndDate] = useState<Date | undefined>();
   const [fcStartDate, setFcStartDate] = useState<Date | undefined>();
   const [fcEndDate, setFcEndDate] = useState<Date | undefined>();
+  const [fcPeriodMode, setFcPeriodMode] = useState<'last6m' | 'all'>('last6m');
   const [fcSelectedCompany, setFcSelectedCompany] = useState<string>('all');
   const [fcHideInternal, setFcHideInternal] = useState<boolean>(true);
   const [isPrinting, setIsPrinting] = useState(false);
@@ -63,6 +87,8 @@ export default function App() {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [financeLimit, setFinanceLimit] = useState(100);
+  const [kanbanOverview, setKanbanOverview] = useState<SprintOverview[]>([]);
+  const [kanbanOverviewLoading, setKanbanOverviewLoading] = useState(false);
   const knownOrderIdsRef = useRef<Set<number>>(new Set());
 
   type ReportType = 'pagar' | 'receber' | 'abertos' | null;
@@ -70,6 +96,16 @@ export default function App() {
   
   const [alertSortConfig, setAlertSortConfig] = useState<{ key: 'date' | 'vlrUnit' | 'vlrAtual' | 'valorTotal', direction: 'asc' | 'desc' } | null>(null);
   const isRestrictedUser = sessionUser?.role === 'user';
+  const isDark = themeMode === 'dark';
+
+  const toggleThemeMode = useCallback(() => {
+    setThemeMode((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem('dinamica_theme', themeMode);
+    document.documentElement.classList.toggle('dark', themeMode === 'dark');
+  }, [themeMode]);
 
   const toggleSort = (key: 'date' | 'vlrUnit' | 'vlrAtual' | 'valorTotal') => {
     setAlertSortConfig(prev => {
@@ -208,6 +244,19 @@ export default function App() {
   const [selectedCompany, setSelectedCompany] = useState<string>('all');
   const [selectedUser, setSelectedUser] = useState<string>('all');
   const [selectedRequester, setSelectedRequester] = useState<string>('all');
+  const [globalPeriodMode, setGlobalPeriodMode] = useState<'last6m' | 'all'>('last6m');
+  const migratedLegacyDateFilterRef = useRef(false);
+
+  useEffect(() => {
+    if (migratedLegacyDateFilterRef.current) return;
+    migratedLegacyDateFilterRef.current = true;
+
+    // Compatibilidade: em sessoes antigas, o filtro "data final = hoje" vinha predefinido
+    // e podia zerar a tela. Se nenhum outro filtro estiver ativo, limpamos esse valor.
+    if (!startDate && endDate && selectedCompany === 'all' && selectedUser === 'all' && selectedRequester === 'all') {
+      setEndDate(undefined);
+    }
+  }, [endDate, selectedCompany, selectedRequester, selectedUser, startDate]);
 
   const safeFormat = (dateStr: string | undefined, formatStr: string = 'dd/MM/yyyy') => {
     if (!dateStr || dateStr === '---') return '---';
@@ -253,6 +302,17 @@ export default function App() {
     const receber = Array.isArray(payload?.receber) ? payload.receber.length : 0;
     return pedidos > 0 || financeiro > 0 || receber > 0;
   }, []);
+
+  const waitForSharedCache = useCallback(async (maxAttempts = 8, delayMs = 2500) => {
+    for (let i = 0; i < maxAttempts; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      const refreshed = await api.get('/bootstrap');
+      if (bootstrapHasCoreData(refreshed.data)) {
+        return refreshed.data;
+      }
+    }
+    return null;
+  }, [bootstrapHasCoreData]);
 
   const applyBootstrapData = useCallback((payload: any) => {
     const bDataRaw = Array.isArray(payload?.obras) ? payload.obras : [];
@@ -433,9 +493,16 @@ export default function App() {
       if (!bootstrapHasCoreData(payload)) {
         setSyncing(true);
         try {
-          await api.post('/sync');
-          const refreshed = await api.get('/bootstrap');
-          payload = refreshed.data;
+          const syncResponse = await api.post('/sync');
+          if (syncResponse.data?.in_progress) {
+            const sharedPayload = await waitForSharedCache();
+            if (sharedPayload) {
+              payload = sharedPayload;
+            }
+          } else {
+            const refreshed = await api.get('/bootstrap');
+            payload = refreshed.data;
+          }
         } catch (syncError) {
           console.error('Initial sync on empty Render cache failed:', syncError);
         } finally {
@@ -456,7 +523,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [applyBootstrapData, bootstrapHasCoreData, checkConnection]);
+  }, [applyBootstrapData, bootstrapHasCoreData, checkConnection, waitForSharedCache]);
 
   const handleLogin = useCallback((user: AuthUser) => {
     localStorage.setItem('dinamica_session', JSON.stringify(user));
@@ -541,7 +608,16 @@ export default function App() {
           }
         }
       }
-      await refreshData();
+      if (response.data?.in_progress) {
+        const sharedPayload = await waitForSharedCache();
+        if (sharedPayload) {
+          applyBootstrapData(sharedPayload);
+        } else {
+          await refreshData();
+        }
+      } else {
+        await refreshData();
+      }
       setApiStatus('online');
     } catch (e) {
       console.error('Sync error:', e);
@@ -566,9 +642,16 @@ export default function App() {
       if (!bootstrapHasCoreData(payload)) {
         setSyncing(true);
         try {
-          await api.post('/sync');
-          const refreshed = await api.get('/bootstrap');
-          payload = refreshed.data;
+          const syncResponse = await api.post('/sync');
+          if (syncResponse.data?.in_progress) {
+            const sharedPayload = await waitForSharedCache();
+            if (sharedPayload) {
+              payload = sharedPayload;
+            }
+          } else {
+            const refreshed = await api.get('/bootstrap');
+            payload = refreshed.data;
+          }
         } catch (syncError) {
           console.error('Refresh sync on empty Render cache failed:', syncError);
         } finally {
@@ -594,6 +677,22 @@ export default function App() {
     return m;
   }, [buildings]);
 
+  const kanbanSprintsForView = useMemo(() => {
+    if (selectedCompany === 'all') return kanbanOverview;
+    const companyBuildingIds = new Set(
+      buildings.filter((b) => String(b.companyId) === selectedCompany).map((b) => b.id)
+    );
+    return kanbanOverview.filter((s) => companyBuildingIds.has(s.buildingId));
+  }, [buildings, kanbanOverview, selectedCompany]);
+
+  const kanbanSummaryForView = useMemo(() => {
+    return {
+      totalSprints: kanbanSprintsForView.length,
+      overdueSprints: kanbanSprintsForView.filter((s) => s.overdue).length,
+      overdueCards: kanbanSprintsForView.reduce((acc, s) => acc + (s.stats?.overdueCards || 0), 0),
+    };
+  }, [kanbanSprintsForView]);
+
   const creditorMap = useMemo(() => {
     const m: Record<string, string> = {};
     creditors.forEach(c => { m[String(c.id)] = c.name; });
@@ -610,16 +709,31 @@ export default function App() {
     new Date(value.getFullYear(), value.getMonth(), value.getDate()).getTime()
   ), []);
 
+  const defaultWindow = useMemo(() => {
+    const today = new Date();
+    const end = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+    const sixMonthsAgo = addMonths(end, -6);
+    const start = new Date(sixMonthsAgo.getFullYear(), sixMonthsAgo.getMonth(), sixMonthsAgo.getDate());
+    return { start, end };
+  }, []);
+
+  const hasManualDateFilter = useMemo(() => Boolean(startDate || endDate), [endDate, startDate]);
+
   const dateRange = useMemo(() => {
-    const start = startDate ? toStartOfDay(startDate) : null;
-    const effectiveEndDate = endDate || startDate || null;
+    const effectiveStartDate = hasManualDateFilter
+      ? (startDate || null)
+      : (globalPeriodMode === 'last6m' ? defaultWindow.start : null);
+    const start = effectiveStartDate ? toStartOfDay(effectiveStartDate) : null;
+    const effectiveEndDate = hasManualDateFilter
+      ? (endDate || startDate || null)
+      : (globalPeriodMode === 'last6m' ? defaultWindow.end : null);
     const endExclusive = effectiveEndDate ? addDays(new Date(
       effectiveEndDate.getFullYear(),
       effectiveEndDate.getMonth(),
       effectiveEndDate.getDate()
     ), 1).getTime() : null;
     return { start, endExclusive };
-  }, [endDate, startDate, toStartOfDay]);
+  }, [defaultWindow.end, defaultWindow.start, endDate, globalPeriodMode, hasManualDateFilter, startDate, toStartOfDay]);
 
   const matchesDateRange = useCallback((numericValue?: number) => {
     if (!dateRange.start && !dateRange.endExclusive) return true;
@@ -689,8 +803,12 @@ export default function App() {
       if (!id || id === '0' || id === 'undefined') return;
       seen.set(id, { id, name: userMap[id] || (o as any).nomeComprador || (o as any).buyerName || `Comprador ${id}` });
     });
-    return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [ordersForUserOptions, userMap]);
+    const scoped = Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+    if (scoped.length > 0) return scoped;
+    return users
+      .map((u) => ({ id: String(u.id), name: u.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [ordersForUserOptions, userMap, users]);
 
   const availableRequesters = useMemo(() => {
     const seen = new Map<string, User>();
@@ -700,8 +818,12 @@ export default function App() {
       const requesterName = fixText(String((o as any).solicitante || (o as any).nomeSolicitante || userMap[id] || id)).replace(/^Comprador\\s+/i, '').trim();
       seen.set(id, { id, name: requesterName || id });
     });
-    return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
-  }, [ordersForRequesterOptions, userMap]);
+    const scoped = Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+    if (scoped.length > 0) return scoped;
+    return requesters
+      .map((r) => ({ id: String(r.id), name: r.name }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [ordersForRequesterOptions, requesters, userMap]);
 
   const selectedCompanyData = useMemo(
     () => companies.find((company: any) => String(company.id) === selectedCompany) || null,
@@ -730,6 +852,95 @@ export default function App() {
     if (!id || id === '0' || id === 'undefined') return fallback || 'N/A';
     return userMap[String(id)] || fallback || String(id);
   };
+
+  const applyServerFilteredData = useCallback((payload: any) => {
+    const rawOrdersArray = Array.isArray(payload?.pedidos) ? payload.pedidos : [];
+    const fDataRaw = Array.isArray(payload?.financeiro) ? payload.financeiro : [];
+    const rDataRaw = Array.isArray(payload?.receber) ? payload.receber : [];
+
+    const filteredOrdersData: PurchaseOrder[] = rawOrdersArray.map((o: any) => {
+      const dStr = o.dataEmissao || o.data || o.date || '---';
+      const d = parseISO(dStr);
+      return {
+        id: o.id || o.numero || 0,
+        buildingId: o.idObra || o.codigoVisivelObra || o.buildingId || 0,
+        companyId: o.companyId != null ? String(o.companyId) : undefined,
+        buyerId: o.idComprador ? String(o.idComprador) : (o.codigoComprador ? String(o.codigoComprador) : (o.buyerId ? String(o.buyerId) : '0')),
+        date: dStr,
+        dateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        totalAmount: parseFloat(o.valorTotal || o.totalAmount) || 0,
+        supplierId: o.codigoFornecedor || o.supplierId,
+        status: o.situacao || o.status || 'N/A',
+        paymentCondition: o.condicaoPagamento || o.paymentMethod || 'A Prazo',
+        deliveryDate: o.dataEntrega || o.prazoEntrega || '---',
+        internalNotes: o.internalNotes || o.observacao || '',
+        createdBy: fixText(o.nomeComprador || o.createdBy || o.criadoPor || ''),
+        requesterId: fixText(String(o.solicitante || o.requesterId || o.createdBy || '0')).replace(/^Comprador\s+/i, '').trim(),
+      };
+    }).sort((a, b) => (b.dateNumeric || 0) - (a.dateNumeric || 0));
+
+    const filteredFinancialData = fDataRaw.map((f: any) => {
+      const dStr = f.dataVencimento || f.issueDate || f.dueDate || f.dataVencimentoProjetado || f.dataEmissao || f.dataContabil || '---';
+      const d = parseISO(dStr);
+      return {
+        id: f.id || f.numero || f.codigoTitulo || f.documentNumber || 0,
+        buildingId: f.idObra || f.codigoObra || f.enterpriseId || f.buildingId || 0,
+        description: fixText(f.descricao || f.historico || f.tipoDocumento || f.notes || f.observacao || 'Título a Pagar'),
+        creditorName: fixText(f.nomeCredor || f.creditorName || f.nomeFantasiaCredor || f.fornecedor || f.credor || 'Credor sem nome'),
+        _rawCreditorId: String(f.creditorId || f.debtorId || ''),
+        companyId: (() => {
+          if (f.companyId != null) return String(f.companyId);
+          if (f.debtorId != null) return String(f.debtorId);
+          if (Array.isArray(f.links)) {
+            const cLink = f.links.find((l: any) => l.rel === 'company');
+            if (cLink && cLink.href) return cLink.href.split('/').pop();
+          }
+          return undefined;
+        })(),
+        dueDate: dStr,
+        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        amount: parseFloat(f.totalInvoiceAmount || f.valor || f.amount || f.valorTotal || f.valorLiquido || f.valorBruto) || 0,
+        status: f.situacao || f.status || 'Pendente',
+      };
+    });
+
+    const filteredReceivableData = rDataRaw.map((r: any) => {
+      const dStr = r.dataVencimento || r.data || r.date || r.dataEmissao || r.issueDate || r?.dataVencimentoProjetado || '---';
+      const d = parseISO(dStr);
+      const rawValue: number = r.rawValue ?? (parseFloat(r.valor ?? r.value ?? r.valorSaldo ?? r.totalInvoiceAmount ?? r.valorTotal ?? r.amount ?? 0) || 0);
+      return {
+        id: r.id || r.numero || r.numeroTitulo || r.codigoTitulo || r.documentNumber || 0,
+        buildingId: r.idObra || r.codigoObra || r.buildingId || 0,
+        companyId: (() => {
+          if (r.companyId != null) return String(r.companyId);
+          if (Array.isArray(r.links)) {
+            const cLink = r.links.find((l: any) => l.rel === 'company');
+            if (cLink && cLink.href) return cLink.href.split('/').pop();
+          }
+          return undefined;
+        })(),
+        description: fixText(r.descricao || r.historico || r.observacao || r.notes || r.description || 'Título a Receber'),
+        clientName: fixText(r.nomeCliente || r.nomeFantasiaCliente || r.cliente || r.clientName || 'Extrato/Cliente'),
+        dueDate: dStr,
+        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        amount: Math.abs(rawValue),
+        rawValue,
+        status: String(r.situacao || r.status || 'ABERTO').toUpperCase(),
+        type: r.type || 'Income',
+        statementType: r.statementType || '',
+        statementOrigin: r.statementOrigin || '',
+        documentId: r.documentId || '',
+        documentNumber: r.documentNumber || '',
+        installmentNumber: r.installmentNumber ?? null,
+        billId: r.billId ?? null,
+        bankAccountCode: r.bankAccountCode || '',
+      };
+    });
+
+    setOrders(filteredOrdersData);
+    setFinancialTitles(filteredFinancialData);
+    setReceivableTitles(filteredReceivableData);
+  }, []);
 
   // Re-resolve creditor names whenever the creditor list loads (fixes the race with refreshData)
   useEffect(() => {
@@ -774,38 +985,82 @@ export default function App() {
   }, [buildingOptions, selectedMapBuilding]);
 
   useEffect(() => {
-    const filteredOrders = allOrders.filter((o) => {
-      const inDate = matchesDateRange(o.dateNumeric);
-      const inBuilding = matchesCompanyFilter(o.buildingId, (o as any).companyId);
-      const inUser = selectedUser === 'all' || String(o.buyerId) === selectedUser;
-      const inRequester = selectedRequester === 'all' || String(o.requesterId) === selectedRequester || o.requesterId === selectedRequester;
-      return inDate && inBuilding && inUser && inRequester;
-    }).sort((a, b) => (b.dateNumeric || 0) - (a.dateNumeric || 0));
+    if (!sessionUser) return;
+    if (allOrders.length === 0 && allFinancialTitles.length === 0 && allReceivableTitles.length === 0) return;
 
-    const filteredFinancial = allFinancialTitles.filter((f) => {
-      const inDate = matchesDateRange(f.dueDateNumeric);
-      const inBuilding = matchesCompanyFilter(f.buildingId, f.companyId);
-      return inDate && inBuilding;
-    });
+    let cancelled = false;
 
-    const filteredReceivable = allReceivableTitles.filter((r) => {
-      const inDate = matchesDateRange(r.dueDateNumeric);
-      const inBuilding = matchesCompanyFilter(r.buildingId, r.companyId);
-      return inDate && inBuilding;
-    });
+    const runServerSideFiltering = async () => {
+      try {
+        const params: Record<string, string> = {
+          company_id: selectedCompany,
+          user_id: selectedUser,
+          requester_id: selectedRequester,
+        };
+        const effectiveStart = hasManualDateFilter
+          ? (startDate || null)
+          : (globalPeriodMode === 'last6m' ? defaultWindow.start : null);
+        const effectiveEnd = hasManualDateFilter
+          ? (endDate || startDate || null)
+          : (globalPeriodMode === 'last6m' ? defaultWindow.end : null);
+        if (effectiveStart) params.start_date = format(effectiveStart, 'yyyy-MM-dd');
+        if (effectiveEnd) params.end_date = format(effectiveEnd, 'yyyy-MM-dd');
 
-    setOrders(filteredOrders);
-    setFinancialTitles(filteredFinancial);
-    setReceivableTitles(filteredReceivable);
+        const response = await api.get('/sienge/filtered', { params });
+        if (!cancelled) {
+          applyServerFilteredData(response.data);
+        }
+      } catch (error) {
+        if (cancelled) return;
+        // Fallback local if filtered endpoint is unavailable.
+        const filteredOrders = allOrders.filter((o) => {
+          const inDate = matchesDateRange(o.dateNumeric);
+          const inBuilding = matchesCompanyFilter(o.buildingId, (o as any).companyId);
+          const inUser = selectedUser === 'all' || String(o.buyerId) === selectedUser;
+          const inRequester = selectedRequester === 'all' || String(o.requesterId) === selectedRequester || o.requesterId === selectedRequester;
+          return inDate && inBuilding && inUser && inRequester;
+        }).sort((a, b) => (b.dateNumeric || 0) - (a.dateNumeric || 0));
+
+        const filteredFinancial = allFinancialTitles.filter((f) => {
+          const inDate = matchesDateRange(f.dueDateNumeric);
+          const inBuilding = matchesCompanyFilter(f.buildingId, f.companyId);
+          return inDate && inBuilding;
+        });
+
+        const filteredReceivable = allReceivableTitles.filter((r) => {
+          const inDate = matchesDateRange(r.dueDateNumeric);
+          const inBuilding = matchesCompanyFilter(r.buildingId, r.companyId);
+          return inDate && inBuilding;
+        });
+
+        setOrders(filteredOrders);
+        setFinancialTitles(filteredFinancial);
+        setReceivableTitles(filteredReceivable);
+      }
+    };
+
+    runServerSideFiltering();
+
+    return () => {
+      cancelled = true;
+    };
   }, [
     allFinancialTitles,
     allOrders,
     allReceivableTitles,
+    applyServerFilteredData,
+    defaultWindow.end,
+    defaultWindow.start,
+    endDate,
+    globalPeriodMode,
+    hasManualDateFilter,
     matchesCompanyFilter,
     matchesDateRange,
     selectedCompany,
     selectedRequester,
-    selectedUser
+    selectedUser,
+    sessionUser,
+    startDate,
   ]);
 
   useEffect(() => {
@@ -876,6 +1131,23 @@ export default function App() {
     };
   }, [fetchInitialData, sessionUser]);
 
+  const loadKanbanOverview = useCallback(async () => {
+    setKanbanOverviewLoading(true);
+    try {
+      const response = await kanbanApi.get('/overview');
+      setKanbanOverview(Array.isArray(response.data?.sprints) ? response.data.sprints : []);
+    } catch {
+      setKanbanOverview([]);
+    } finally {
+      setKanbanOverviewLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!sessionUser || activeTab !== 'obras-alerta') return;
+    loadKanbanOverview();
+  }, [activeTab, loadKanbanOverview, sessionUser]);
+
   const handlePrint = () => {
     setIsPrinting(true);
     setTimeout(() => {
@@ -895,6 +1167,43 @@ export default function App() {
       .trim()
       .toUpperCase()
   ), []);
+
+  const translateStatusLabel = useCallback((value: unknown) => {
+    const raw = fixText(String(value || 'N/D')).trim();
+    const normalized = normalizeStatus(value);
+    const map: Record<string, string> = {
+      CANCELED: 'CANCELADO',
+      CANCELLED: 'CANCELADO',
+      FULLY_DELIVERED: 'ENTREGUE TOTAL',
+      PARTIALLY_DELIVERED: 'ENTREGUE PARCIAL',
+      PENDING: 'PENDENTE',
+      APPROVED: 'APROVADO',
+      REJECTED: 'REPROVADO',
+      OPEN: 'ABERTO',
+      CLOSED: 'FECHADO',
+      IN_PROGRESS: 'EM ANDAMENTO',
+      WAITING: 'AGUARDANDO',
+      SUCCESS: 'SUCESSO',
+      ERROR: 'ERRO',
+      DRAFT: 'RASCUNHO',
+      ON_HOLD: 'EM ESPERA',
+      N_A: 'N/D',
+    };
+    return map[normalized] || raw || 'N/D';
+  }, [normalizeStatus]);
+
+  const translateStatementType = useCallback((value: unknown) => {
+    const normalized = normalizeStatus(value);
+    const map: Record<string, string> = {
+      INCOME: 'RECEBIMENTO',
+      EXPENSE: 'PAGAMENTO',
+      PAYMENT: 'PAGAMENTO',
+      RECEIPT: 'RECEBIMENTO',
+      TRANSFER: 'TRANSFERÊNCIA',
+      ADJUSTMENT: 'AJUSTE',
+    };
+    return map[normalized] || fixText(String(value || 'Lançamento'));
+  }, [normalizeStatus]);
 
   const isSettledFinancialStatus = useCallback((value: unknown) => {
     const status = normalizeStatus(value);
@@ -1011,9 +1320,18 @@ export default function App() {
   }, [allFinancialTitles, allOrders, isSettledFinancialStatus, matchesCompanyFilter, selectedCompany]);
 
   const fluxoDeCaixaData = useMemo(() => {
-    // Computa as datas limite APENAS UMA VEZ por re-render (evita chamar format 120 mil vezes)
-    const fStartDateNumeric = fcStartDate ? parseInt(format(fcStartDate, 'yyyyMMdd')) : null;
-    const fEndDateNumeric = fcEndDate ? parseInt(format(fcEndDate, 'yyyyMMdd')) : null;
+    // Quando nao ha data manual, o modo selecionado define se usa 6 meses ou periodo total.
+    const fcHasManualDate = Boolean(fcStartDate || fcEndDate);
+    const fcEffectiveStart = fcHasManualDate
+      ? (fcStartDate || null)
+      : (fcPeriodMode === 'last6m' ? defaultWindow.start : null);
+    const fcEffectiveEnd = fcHasManualDate
+      ? (fcEndDate || fcStartDate || null)
+      : (fcPeriodMode === 'last6m' ? defaultWindow.end : null);
+
+    // Computa as datas limite APENAS UMA VEZ por re-render (evita chamar format em loop)
+    const fStartDateNumeric = fcEffectiveStart ? parseInt(format(fcEffectiveStart, 'yyyyMMdd')) : null;
+    const fEndDateNumeric = fcEffectiveEnd ? parseInt(format(fcEffectiveEnd, 'yyyyMMdd')) : null;
 
     // Helper: filtro de data exclusivo do Fluxo de Caixa altamente otimizado
     const matchesFcDate = (dateNum: number | undefined) => {
@@ -1050,7 +1368,7 @@ export default function App() {
         matchesAccount((t as any).bankAccountCode || '', (t as any).statementOrigin || '')
       );
 
-    const merged = extratoFiltrado.map(t => {
+    let merged = extratoFiltrado.map(t => {
       // rawValue: valor com sinal original da API Sienge
       // Income positivo → entrada de dinheiro
       // Income negativo → estorno/devolução de entrada (reduz entradas)
@@ -1086,7 +1404,7 @@ export default function App() {
         titParc,
         documento: docId || docNum || `EXT-${t.id}`,
         origem: (t as any).statementOrigin || '',
-        statementType: (t as any).statementType || (isIncome ? 'Recebimento' : 'Pagamento'),
+        statementType: translateStatementType((t as any).statementType || (isIncome ? 'Recebimento' : 'Pagamento')),
         bankAccount: (t as any).bankAccountCode || '',
         pessoa: t.clientName || t.description || 'Extrato Diversos',
         entrada,   // pode ser negativo (estorno de entrada)
@@ -1094,13 +1412,50 @@ export default function App() {
       };
     }).sort((a, b) => (a.dataNumeric || 0) - (b.dataNumeric || 0));
 
+    // Fallback: quando extrato não existir, monta fluxo mínimo com contas a pagar/receber filtradas.
+    if (merged.length === 0) {
+      const receberFallback = (Array.isArray(allReceivableTitles) ? allReceivableTitles : [])
+        .filter((t) => matchesFcDate(t.dueDateNumeric) && matchesFcCompany(t.buildingId, (t as any).companyId))
+        .map((t) => ({
+          id: t.id,
+          data: t.dueDate,
+          dataNumeric: t.dueDateNumeric,
+          titParc: String(t.documentNumber || t.id || ''),
+          documento: String(t.documentNumber || t.id || ''),
+          origem: 'RC',
+          statementType: 'Recebimento',
+          bankAccount: '',
+          pessoa: t.clientName || t.description || 'Cliente',
+          entrada: Math.abs(toMoney(t.amount)),
+          saida: 0,
+        }));
+
+      const pagarFallback = (Array.isArray(allFinancialTitles) ? allFinancialTitles : [])
+        .filter((t) => matchesFcDate(t.dueDateNumeric) && matchesFcCompany(t.buildingId, (t as any).companyId))
+        .map((t) => ({
+          id: t.id,
+          data: t.dueDate,
+          dataNumeric: t.dueDateNumeric,
+          titParc: String(t.id || ''),
+          documento: String(t.id || ''),
+          origem: 'PG',
+          statementType: 'Pagamento',
+          bankAccount: '',
+          pessoa: t.creditorName || t.description || 'Credor',
+          entrada: 0,
+          saida: Math.abs(toMoney(t.amount)),
+        }));
+
+      merged = [...receberFallback, ...pagarFallback].sort((a, b) => (a.dataNumeric || 0) - (b.dataNumeric || 0));
+    }
+
     // Calcular Saldo Acumulado: entrada adiciona (mesmo se negativo), saída subtrai
     let saldoAtual = 0;
     return merged.map(row => {
       saldoAtual = saldoAtual + row.entrada - row.saida;
       return { ...row, saldo: saldoAtual };
     });
-  }, [allReceivableTitles, fcStartDate, fcEndDate, fcSelectedCompany, fcHideInternal, buildings]);
+  }, [allFinancialTitles, allReceivableTitles, defaultWindow.end, defaultWindow.start, fcEndDate, fcHideInternal, fcPeriodMode, fcSelectedCompany, fcStartDate, buildings, translateStatementType]);
 
 
   const chartData = useMemo(() => {
@@ -1181,11 +1536,11 @@ export default function App() {
     const map: Record<string, number> = {};
     const ordersArray = Array.isArray(orders) ? orders : [];
     ordersArray.forEach(o => {
-      const status = normalizeStatus(o.status) || 'N/D';
+      const status = translateStatusLabel(o.status) || 'N/D';
       map[status] = (map[status] || 0) + 1;
     });
     return Object.entries(map).map(([name, value]) => ({ name, value })).sort((a,b) => b.value - a.value);
-  }, [orders, normalizeStatus]);
+  }, [orders, translateStatusLabel]);
 
   const financeBalanceData = useMemo(() => {
     const paid = financialTitles.filter(f => isSettledFinancialStatus(f.status)).reduce((acc, curr) => acc + toMoney(curr.amount), 0);
@@ -1258,7 +1613,7 @@ export default function App() {
       const obra = bMap[o.buildingId] || o.buildingId;
       const user = uMap[o.buyerId] || o.buyerId;
       const valorStr = String(o.totalAmount || 0).replace('.', ',');
-      return `${o.id};"${obra}";"${user}";${safeFormat(o.date)};${valorStr};${o.status}`;
+      return `${o.id};"${obra}";"${user}";${safeFormat(o.date)};${valorStr};${translateStatusLabel(o.status)}`;
     }).join("\n");
     // Adiciona BOM (\uFEFF) para forçar o Excel a reconhecer UTF-8
     const blob = new Blob(["\uFEFF" + headers + rows], { type: 'text/csv;charset=utf-8;' });
@@ -1283,21 +1638,21 @@ export default function App() {
       const obra = bMap[o.buildingId] || String(o.buildingId);
       const user = uMap[o.buyerId] || String(o.buyerId);
       const valorStr = String(o.totalAmount || 0).replace('.', ',');
-      csvRows.push(`Pedido;${o.id};"${obra}";"${user}";${safeFormat(o.date)};${valorStr};${o.status}`);
+      csvRows.push(`Pedido;${o.id};"${obra}";"${user}";${safeFormat(o.date)};${valorStr};${translateStatusLabel(o.status)}`);
     });
 
     financialTitles.forEach(f => {
       const obra = bMap[f.buildingId] || String(f.buildingId);
       const credor = f.creditorName || "S/N";
       const valorStr = String(f.amount || 0).replace('.', ',');
-      csvRows.push(`A Pagar;${f.id};"${obra}";"${credor}";${safeFormat(f.dueDate)};${valorStr};${f.status}`);
+      csvRows.push(`A Pagar;${f.id};"${obra}";"${credor}";${safeFormat(f.dueDate)};${valorStr};${translateStatusLabel(f.status)}`);
     });
 
     receivableTitles.forEach(r => {
       const obra = bMap[r.buildingId] || String(r.buildingId);
       const cliente = r.clientName || "S/N";
       const valorStr = String(r.amount || 0).replace('.', ',');
-      csvRows.push(`A Receber;${r.id};"${obra}";"${cliente}";${safeFormat(r.dueDate)};${valorStr};${r.status}`);
+      csvRows.push(`A Receber;${r.id};"${obra}";"${cliente}";${safeFormat(r.dueDate)};${valorStr};${translateStatusLabel(r.status)}`);
     });
 
     const blob = new Blob(["\uFEFF" + headers + csvRows.join("\n")], { type: 'text/csv;charset=utf-8;' });
@@ -1309,28 +1664,40 @@ export default function App() {
     document.body.removeChild(link);
   };
   if (!authReady) {
-    return <div className="min-h-screen bg-[#0F0F10]" />;
+    return <div className={cn("min-h-screen", isDark ? "bg-[#0F1115]" : "bg-[#F3F5F7]")} />;
   }
 
   if (!sessionUser) {
-    return <LoginScreen onLogin={handleLogin} />;
+    return <LoginScreen onLogin={handleLogin} themeMode={themeMode} onToggleTheme={toggleThemeMode} />;
   }
 
   return (
     <>
-    <div className={cn("min-h-screen overflow-x-hidden bg-[#0F0F10] text-gray-100 font-sans selection:bg-orange-500/30", reportType ? "print:hidden" : "")}>
+    <div className={cn(
+      "min-h-screen overflow-x-hidden font-sans selection:bg-emerald-500/20",
+      isDark ? "bg-[#0F1115] text-slate-100" : "bg-[#F3F5F7] text-[#102A40]",
+      reportType ? "print:hidden" : ""
+    )}>
       {/* Header */}
-      <header className="border-b border-white/5 bg-[#161618]/80 backdrop-blur-xl sticky top-0 z-50 print:hidden">
+      <header className={cn(
+        "border-b backdrop-blur-xl sticky top-0 z-50 print:hidden shadow-sm",
+        isDark ? "border-slate-800 bg-[#11141A]/95" : "border-slate-200 bg-white/95"
+      )}>
         <div className="tablet-safe-wrap w-full max-w-[98%] 2xl:max-w-[1800px] mx-auto px-4 sm:px-6 h-16 sm:h-20 flex items-center justify-between gap-3">
           {/* Logo */}
-          <div className="flex items-center gap-3 shrink-0">
-            <div className="w-9 h-9 sm:w-12 sm:h-12 bg-gradient-to-br from-orange-500 to-orange-700 rounded-xl sm:rounded-2xl flex items-center justify-center shadow-lg shadow-orange-500/20">
-              <Building2 className="text-white" size={20} />
-            </div>
+          <div className="flex items-center gap-3 shrink-0 min-w-0">
+            <img
+              src={isDark ? logoWordmarkDark : logoWordmark}
+              alt="Dinâmica Empreendimentos"
+              className={cn(
+                "w-auto",
+                isDark ? "h-10 sm:h-11" : "h-9 sm:h-11"
+              )}
+            />
             <div>
-              <h1 className="text-lg sm:text-2xl font-black tracking-tighter text-white uppercase">Dinamica</h1>
+              <h1 className="hidden">Dinâmica</h1>
               <div className="flex items-center gap-2">
-                <p className="hidden sm:block text-[10px] font-bold tracking-[0.2em] text-orange-500 uppercase opacity-80">Dashboard Financeiro</p>
+                <p className="hidden sm:block text-[10px] font-bold tracking-[0.2em] text-[#4CB232] uppercase">Dashboard Financeiro</p>
                 {apiStatus === 'online' && (
                   <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-[9px] font-bold text-emerald-500 uppercase tracking-wider">
                     <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
@@ -1346,35 +1713,58 @@ export default function App() {
 
           {/* Desktop Actions */}
           <div className="hidden xl:flex items-center gap-2 2xl:gap-3">
-            <div className="flex flex-col rounded-xl border border-white/5 bg-white/5 px-3 py-2 text-xs font-bold text-gray-300 min-w-[128px] max-w-[150px]">
+            <div className={cn(
+              "flex flex-col rounded-xl border px-3 py-2 text-xs font-bold min-w-[128px] max-w-[150px]",
+              isDark ? "border-slate-700 bg-slate-900 text-slate-200" : "border-slate-200 bg-slate-50 text-slate-700"
+            )}>
               <div className="flex items-center gap-2">
-                <UserIcon size={14} className="text-orange-500" />
+                <UserIcon size={14} className="text-[#4CB232]" />
                 <span className="truncate">{sessionUser.name}</span>
               </div>
               <Button
                 onClick={handleLogout}
                 variant="outline"
-                className="mt-2 h-9 border-white/10 bg-transparent text-white hover:bg-white/10 font-bold rounded-lg px-3 gap-2"
+                className={cn(
+                  "mt-2 h-9 font-bold rounded-lg px-3 gap-2",
+                  isDark ? "border-slate-700 bg-slate-800 text-slate-100 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+                )}
               >
                 <LogOut size={14} />
                 <span>Sair</span>
               </Button>
             </div>
+            <Button
+              onClick={toggleThemeMode}
+              variant="outline"
+              className={cn(
+                "rounded-xl h-11 px-3 2xl:px-4 gap-2 font-bold",
+                isDark
+                  ? "border-slate-700 bg-slate-900 text-slate-100 hover:bg-slate-800"
+                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100"
+              )}
+              title={isDark ? "Ativar modo claro" : "Ativar modo escuro"}
+            >
+              {isDark ? <Sun size={16} /> : <Moon size={16} />}
+              <span>{isDark ? 'Dia' : 'Noite'}</span>
+            </Button>
+            <Button 
+              onClick={syncSienge}
+              disabled={syncing}
+              className={cn(
+                "text-white font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2 shrink-0 min-w-[176px]",
+                isDark ? "bg-[#1B3C58] hover:bg-[#234b6e]" : "bg-[#102A40] hover:bg-[#173A57]"
+              )}
+            >
+              <RefreshCw size={16} className={cn(syncing && "animate-spin")} />
+              <span>{syncing ? "Atualizando..." : "Atualizar Dados"}</span>
+            </Button>
             <Button 
               onClick={downloadData}
               variant="outline"
-              className="bg-orange-600/10 text-orange-500 border-orange-600/20 hover:bg-orange-600 hover:text-white font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2"
+              className="bg-[#4CB232]/10 text-[#3A9928] border-[#4CB232]/30 hover:bg-[#4CB232] hover:text-white font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2"
             >
               <Download size={16} />
               <span className="hidden 2xl:inline">Baixar Dados</span>
-            </Button>
-            <Button 
-              onClick={syncSienge} 
-              disabled={syncing}
-              className="bg-white text-black hover:bg-gray-200 font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2 shrink-0"
-            >
-              <RefreshCw size={16} className={cn(syncing && "animate-spin")} />
-              <span className="hidden 2xl:inline">{syncing ? "Sincronizando..." : "Sincronizar"}</span>
             </Button>
           </div>
 
@@ -1383,19 +1773,35 @@ export default function App() {
             <button
               onClick={syncSienge}
               disabled={syncing}
-              className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 text-white"
+              className={cn(
+                "w-9 h-9 flex items-center justify-center rounded-xl text-white",
+                isDark ? "bg-[#1B3C58]" : "bg-[#102A40]"
+              )}
             >
               <RefreshCw size={16} className={cn(syncing && "animate-spin")} />
             </button>
             <button
+              onClick={toggleThemeMode}
+              className={cn(
+                "w-9 h-9 flex items-center justify-center rounded-xl",
+                isDark ? "bg-slate-900 text-slate-100" : "bg-white text-slate-700 border border-slate-200"
+              )}
+              title={isDark ? "Ativar modo claro" : "Ativar modo escuro"}
+            >
+              {isDark ? <Sun size={15} /> : <Moon size={15} />}
+            </button>
+            <button
               onClick={downloadData}
-              className="w-9 h-9 flex items-center justify-center rounded-xl bg-orange-600/20 text-orange-500"
+              className="w-9 h-9 flex items-center justify-center rounded-xl bg-[#4CB232]/15 text-[#3A9928]"
             >
               <Download size={16} />
             </button>
             <button
               onClick={handleLogout}
-              className="w-9 h-9 flex items-center justify-center rounded-xl bg-white/10 text-white"
+              className={cn(
+                "w-9 h-9 flex items-center justify-center rounded-xl",
+                isDark ? "bg-slate-800 text-slate-200" : "bg-slate-200 text-slate-700"
+              )}
             >
               <LogOut size={16} />
             </button>
@@ -1404,14 +1810,17 @@ export default function App() {
       </header>
 
       {/* Mobile Bottom Navigation */}
-      <nav className="xl:hidden fixed bottom-0 left-0 right-0 z-50 bg-[#161618]/95 backdrop-blur-xl border-t border-white/5 flex flex-wrap print:hidden">
+      <nav className={cn(
+        "xl:hidden fixed bottom-0 left-0 right-0 z-50 backdrop-blur-xl border-t flex flex-wrap print:hidden",
+        isDark ? "bg-[#11141A]/95 border-slate-800" : "bg-white/95 border-slate-200"
+      )}>
         {availableTabs.map((tab) => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id as any)}
             className={cn(
               "flex-1 flex flex-col items-center justify-center py-2 gap-1 text-[10px] font-bold transition-all",
-              activeTab === tab.id ? "text-orange-500" : "text-gray-500"
+              activeTab === tab.id ? "text-[#4CB232]" : (isDark ? "text-slate-400" : "text-slate-500")
             )}
           >
             <tab.icon size={20} />
@@ -1432,8 +1841,13 @@ export default function App() {
             <div className="flex items-center gap-3">
               <SlidersHorizontal size={16} className="text-orange-500" />
               <span className="text-sm font-black uppercase tracking-widest text-orange-500">Filtros</span>
-              {(selectedCompany !== 'all' || selectedUser !== 'all' || selectedRequester !== 'all' || startDate) && (
+              {(selectedCompany !== 'all' || selectedUser !== 'all' || selectedRequester !== 'all' || startDate || endDate) && (
                 <span className="bg-orange-600 text-white text-[9px] font-black px-2 py-0.5 rounded-full uppercase">Ativo</span>
+              )}
+              {(!startDate && !endDate && selectedCompany === 'all' && selectedUser === 'all' && selectedRequester === 'all') && (
+                <span className="bg-sky-600/20 border border-sky-500/30 text-sky-300 text-[9px] font-black px-2 py-0.5 rounded-full uppercase">
+                  {globalPeriodMode === 'last6m' ? 'Padrão: 6 meses' : 'Padrão: período total'}
+                </span>
               )}
             </div>
             <ChevronDown
@@ -1446,6 +1860,42 @@ export default function App() {
           <div className={cn("md:block", mobileFiltersOpen ? "block" : "hidden")}>
             <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-end gap-4 px-4 sm:px-6 pb-4 sm:pb-6 pt-0">
               <div className="space-y-2 flex-1 sm:flex-none">
+                <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Período</Label>
+                <div className="flex items-center gap-2 bg-black/30 border border-white/10 rounded-xl p-1 h-11">
+                  <button
+                    onClick={() => {
+                      setGlobalPeriodMode('last6m');
+                      setStartDate(undefined);
+                      setEndDate(undefined);
+                    }}
+                    className={cn(
+                      "h-9 px-3 rounded-lg text-[11px] font-black uppercase tracking-wide transition-all",
+                      globalPeriodMode === 'last6m'
+                        ? "bg-orange-600 text-white"
+                        : "text-gray-300 hover:text-white hover:bg-white/10"
+                    )}
+                  >
+                    Últimos 6 meses
+                  </button>
+                  <button
+                    onClick={() => {
+                      setGlobalPeriodMode('all');
+                      setStartDate(undefined);
+                      setEndDate(undefined);
+                    }}
+                    className={cn(
+                      "h-9 px-3 rounded-lg text-[11px] font-black uppercase tracking-wide transition-all",
+                      globalPeriodMode === 'all'
+                        ? "bg-sky-600 text-white"
+                        : "text-gray-300 hover:text-white hover:bg-white/10"
+                    )}
+                  >
+                    Período total
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-2 flex-1 sm:flex-none">
                 <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Data Inicial</Label>
                 <Popover>
                   <PopoverTrigger className={cn(buttonVariants({ variant: "outline" }), "w-full sm:w-[160px] h-11 justify-start bg-black/40 border-white/10 rounded-xl text-white font-bold")}>
@@ -1456,7 +1906,11 @@ export default function App() {
                     <Calendar
                       mode="single"
                       selected={startDate}
-                      onSelect={(date: any) => date && setStartDate(date)}
+                      onSelect={(date: any) => {
+                        if (!date) return;
+                        setGlobalPeriodMode('last6m');
+                        setStartDate(date);
+                      }}
                       className="text-white"
                     />
                   </PopoverContent>
@@ -1474,7 +1928,11 @@ export default function App() {
                     <Calendar
                       mode="single"
                       selected={endDate}
-                      onSelect={(date: any) => date && setEndDate(date)}
+                      onSelect={(date: any) => {
+                        if (!date) return;
+                        setGlobalPeriodMode('last6m');
+                        setEndDate(date);
+                      }}
                       className="text-white"
                     />
                   </PopoverContent>
@@ -1709,7 +2167,120 @@ export default function App() {
             </motion.div>
           )}
 
-          {(activeTab === 'alerts' || activeTab === 'financeiro-alerta' || activeTab === 'obras-alerta') && (
+          {activeTab === 'obras-alerta' && (
+            <motion.div
+              key="obras-alerta"
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.95 }}
+              className="w-full space-y-6"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <h3 className="text-xl sm:text-2xl font-black text-white flex items-center gap-3">
+                  <AlertTriangle className="text-orange-500" size={24} />
+                  Painel de Sprints (Kanban)
+                </h3>
+                <Button
+                  onClick={loadKanbanOverview}
+                  className="bg-white text-black hover:bg-gray-200 font-black tracking-tight rounded-xl text-sm h-9"
+                >
+                  <RefreshCw size={14} className={cn('mr-2', kanbanOverviewLoading && 'animate-spin')} />
+                  Atualizar Painel
+                </Button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <Card className="bg-[#161618] border-white/5 shadow-2xl">
+                  <CardContent className="p-4">
+                    <p className="text-[10px] font-black uppercase text-gray-500 mb-1">Total de Sprints</p>
+                    <p className="text-2xl font-black text-white">{kanbanSummaryForView.totalSprints}</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-[#161618] border-white/5 shadow-2xl">
+                  <CardContent className="p-4">
+                    <p className="text-[10px] font-black uppercase text-gray-500 mb-1">Sprints em Atraso</p>
+                    <p className="text-2xl font-black text-red-400">{kanbanSummaryForView.overdueSprints}</p>
+                  </CardContent>
+                </Card>
+                <Card className="bg-[#161618] border-white/5 shadow-2xl">
+                  <CardContent className="p-4">
+                    <p className="text-[10px] font-black uppercase text-gray-500 mb-1">Cards em Atraso</p>
+                    <p className="text-2xl font-black text-orange-400">{kanbanSummaryForView.overdueCards}</p>
+                  </CardContent>
+                </Card>
+              </div>
+
+              <Card className="bg-[#161618] border-white/5 shadow-2xl">
+                <CardHeader>
+                  <CardTitle className="text-lg font-black uppercase tracking-tight text-white">Sprints Criadas no Kanban</CardTitle>
+                </CardHeader>
+                <CardContent className="p-0 overflow-x-auto overflow-y-auto max-h-[620px] custom-scrollbar">
+                  <Table>
+                    <TableHeader className="bg-black/80 sticky top-0 z-10 backdrop-blur-md border-b border-white/10">
+                      <TableRow className="border-none">
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Sprint</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Obra</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Início</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500">Prazo Final</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 text-center">Progresso</TableHead>
+                        <TableHead className="text-[10px] font-black uppercase text-gray-500 text-center">Status</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {kanbanOverviewLoading ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-10 text-gray-400 font-bold">Carregando sprints...</TableCell>
+                        </TableRow>
+                      ) : kanbanSprintsForView.length === 0 ? (
+                        <TableRow>
+                          <TableCell colSpan={6} className="text-center py-10 text-gray-500 font-bold">Nenhuma sprint encontrada para os filtros atuais.</TableCell>
+                        </TableRow>
+                      ) : (
+                        kanbanSprintsForView.map((sprint) => {
+                          const totalCards = sprint.stats?.totalCards || 0;
+                          const openCards = sprint.stats?.openCards || 0;
+                          const doneCards = Math.max(totalCards - openCards, 0);
+                          const progress = totalCards > 0 ? Math.round((doneCards / totalCards) * 100) : 0;
+
+                          return (
+                            <TableRow key={sprint.id} className="border-white/5 hover:bg-white/[0.03]">
+                              <TableCell>
+                                <div className="flex items-center gap-2">
+                                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: sprint.color || '#f97316' }} />
+                                  <span className="font-bold text-white text-xs">{sprint.name}</span>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-xs font-bold text-gray-300">{sprint.buildingName || `Obra ${sprint.buildingId}`}</TableCell>
+                              <TableCell className="text-xs text-gray-400">{sprint.startDate ? safeFormat(sprint.startDate, 'dd/MM/yyyy') : '—'}</TableCell>
+                              <TableCell className="text-xs text-gray-400">{sprint.endDate ? safeFormat(sprint.endDate, 'dd/MM/yyyy') : '—'}</TableCell>
+                              <TableCell className="text-center">
+                                <Badge className="bg-white/10 text-white border-white/10 font-black text-[10px]">
+                                  {doneCards}/{totalCards} ({progress}%)
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="text-center">
+                                {sprint.overdue ? (
+                                  <Badge className="bg-red-600 text-white font-black text-[10px] animate-pulse">
+                                    ALERTA: ATRASADA
+                                  </Badge>
+                                ) : (
+                                  <Badge className="bg-emerald-600 text-white font-black text-[10px]">
+                                    NO PRAZO
+                                  </Badge>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })
+                      )}
+                    </TableBody>
+                  </Table>
+                </CardContent>
+              </Card>
+            </motion.div>
+          )}
+
+          {(activeTab === 'alerts' || activeTab === 'financeiro-alerta') && (
             <motion.div
               key="alerts"
               initial={{ opacity: 0, scale: 0.95 }}
@@ -1996,7 +2567,7 @@ export default function App() {
                                 <TableRow key={`alert-${o.id}-fallback-${i}`} className="border-white/5 hover:bg-white/5 transition-colors">
                                   <TableCell className="font-bold text-orange-500 whitespace-nowrap">{desc}</TableCell>
                                   <TableCell className="text-xs text-gray-500">{safeFormat(o.date)}</TableCell>
-                                  <TableCell><Badge variant="outline" className="bg-white/5 text-gray-400 border-white/10 uppercase text-[9px]">{o.status}</Badge></TableCell>
+                                  <TableCell><Badge variant="outline" className="bg-white/5 text-gray-400 border-white/10 uppercase text-[9px]">{translateStatusLabel(o.status)}</Badge></TableCell>
                                   <TableCell className="text-xs text-gray-400 max-w-[120px] truncate">{solicitante}</TableCell>
                                   <TableCell className="text-xs text-gray-400 max-w-[120px] truncate">{comprador}</TableCell>
                                   <TableCell className="text-xs text-gray-400">{o.paymentCondition || "N/A"}</TableCell>
@@ -2030,7 +2601,7 @@ export default function App() {
                                 </TableCell>
                                 <TableCell className="text-xs text-gray-500">{safeFormat(o.date)}</TableCell>
                                 <TableCell>
-                                  <Badge variant="outline" className="bg-white/5 text-gray-400 border-white/10 uppercase text-[9px]">{o.status}</Badge>
+                                  <Badge variant="outline" className="bg-white/5 text-gray-400 border-white/10 uppercase text-[9px]">{translateStatusLabel(o.status)}</Badge>
                                 </TableCell>
                                 <TableCell className="text-xs text-gray-400 max-w-[120px] truncate">{solicitante}</TableCell>
                                 <TableCell className="text-xs text-gray-400 max-w-[120px] truncate">{comprador}</TableCell>
@@ -2385,6 +2956,42 @@ export default function App() {
             >
               {/* Filtros Exclusivos do Fluxo de Caixa */}
               <div className="bg-[#161618] border border-white/5 p-4 rounded-2xl shadow-2xl relative z-10 flex flex-wrap gap-4 items-end">
+                <div className="space-y-2 flex-1 min-w-[260px]">
+                  <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Período</Label>
+                  <div className="flex items-center gap-2 bg-black/30 border border-white/10 rounded-xl p-1 h-11">
+                    <button
+                      onClick={() => {
+                        setFcPeriodMode('last6m');
+                        setFcStartDate(undefined);
+                        setFcEndDate(undefined);
+                      }}
+                      className={cn(
+                        "h-9 px-3 rounded-lg text-[11px] font-black uppercase tracking-wide transition-all",
+                        fcPeriodMode === 'last6m'
+                          ? "bg-orange-600 text-white"
+                          : "text-gray-300 hover:text-white hover:bg-white/10"
+                      )}
+                    >
+                      Últimos 6 meses
+                    </button>
+                    <button
+                      onClick={() => {
+                        setFcPeriodMode('all');
+                        setFcStartDate(undefined);
+                        setFcEndDate(undefined);
+                      }}
+                      className={cn(
+                        "h-9 px-3 rounded-lg text-[11px] font-black uppercase tracking-wide transition-all",
+                        fcPeriodMode === 'all'
+                          ? "bg-sky-600 text-white"
+                          : "text-gray-300 hover:text-white hover:bg-white/10"
+                      )}
+                    >
+                      Período total
+                    </button>
+                  </div>
+                </div>
+
                 <div className="space-y-2 flex-1 min-w-[200px]">
                   <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Data Inicial</Label>
                   <Popover>
@@ -2395,7 +3002,18 @@ export default function App() {
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0 bg-[#161618] border-white/10 text-white" align="start">
-                      <Calendar mode="single" selected={fcStartDate} onSelect={setFcStartDate} initialFocus locale={ptBR} className="bg-[#161618]" />
+                      <Calendar
+                        mode="single"
+                        selected={fcStartDate}
+                        onSelect={(date) => {
+                          if (!date) return;
+                          setFcPeriodMode('last6m');
+                          setFcStartDate(date);
+                        }}
+                        initialFocus
+                        locale={ptBR}
+                        className="bg-[#161618]"
+                      />
                     </PopoverContent>
                   </Popover>
                 </div>
@@ -2410,7 +3028,18 @@ export default function App() {
                       </Button>
                     </PopoverTrigger>
                     <PopoverContent className="w-auto p-0 bg-[#161618] border-white/10 text-white" align="start">
-                      <Calendar mode="single" selected={fcEndDate} onSelect={setFcEndDate} initialFocus locale={ptBR} className="bg-[#161618]" />
+                      <Calendar
+                        mode="single"
+                        selected={fcEndDate}
+                        onSelect={(date) => {
+                          if (!date) return;
+                          setFcPeriodMode('last6m');
+                          setFcEndDate(date);
+                        }}
+                        initialFocus
+                        locale={ptBR}
+                        className="bg-[#161618]"
+                      />
                     </PopoverContent>
                   </Popover>
                 </div>
@@ -2451,6 +3080,33 @@ export default function App() {
                     )}
                   </Button>
                 </div>
+
+                <div className="flex items-end gap-2 min-w-[220px]">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setFcPeriodMode('last6m');
+                      setFcStartDate(undefined);
+                      setFcEndDate(undefined);
+                      setFcSelectedCompany('all');
+                      setFcHideInternal(false);
+                    }}
+                    className="h-11 rounded-xl border-white/10 bg-black/30 text-gray-300 hover:bg-white/10 hover:text-white"
+                  >
+                    Limpar Filtros
+                  </Button>
+                  <Button
+                    onClick={syncSienge}
+                    disabled={syncing}
+                    className={cn(
+                      "h-11 rounded-xl font-bold",
+                      isDark ? "bg-[#1B3C58] hover:bg-[#234b6e]" : "bg-[#102A40] hover:bg-[#173A57]"
+                    )}
+                  >
+                    <RefreshCw size={15} className={cn("mr-2", syncing && "animate-spin")} />
+                    {syncing ? 'Atualizando...' : 'Atualizar Dados'}
+                  </Button>
+                </div>
               </div>
 
               {/* Tabela do Fluxo de Caixa */}
@@ -2483,8 +3139,8 @@ export default function App() {
                     <TableBody>
                       {fluxoDeCaixaData.length === 0 ? (
                         <TableRow>
-                          <TableCell colSpan={7} className="text-center py-10 text-gray-500 font-bold">
-                            Nenhuma movimentação encontrada para o período e empresa selecionados.
+                          <TableCell colSpan={9} className="text-center py-10 text-gray-500 font-bold">
+                            Nenhuma movimentação encontrada para o período e empresa selecionados. Use "Limpar Filtros" para exibir todo o extrato.
                           </TableCell>
                         </TableRow>
                       ) : (

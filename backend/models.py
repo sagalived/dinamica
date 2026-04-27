@@ -139,3 +139,10 @@ class LogisticsLocation(TimestampMixin, Base):
     location_type = Column(String(50), nullable=True)
     source = Column(String(100), nullable=True)
     created_by = Column(String(255), nullable=True)
+
+
+class SiengeSnapshot(TimestampMixin, Base):
+    __tablename__ = "sienge_snapshots"
+
+    key = Column(String(120), primary_key=True)
+    payload = Column(Text, nullable=False)

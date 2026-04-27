@@ -23,6 +23,7 @@ class SiengeClient:
         self.access_name = os.getenv("SIENGE_ACCESS_NAME", "")
         self.token = os.getenv("SIENGE_TOKEN", "")
         self.timeout = 30
+        self.last_error: dict[str, Any] | None = None
 
         self.basic_auth_user = self.access_name or self.username
         self.basic_auth_password = self.token or self.password
@@ -35,6 +36,18 @@ class SiengeClient:
             self.is_configured = False
         else:
             self.is_configured = True
+
+    def _record_error(self, endpoint: str, url: str, exc: Exception, params: dict[str, Any] | None = None) -> None:
+        status_code = None
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code
+        self.last_error = {
+            "endpoint": endpoint,
+            "url": url,
+            "status_code": status_code,
+            "message": str(exc),
+            "params": params or {},
+        }
 
     def _get_headers(self) -> dict:
         headers = {
@@ -64,6 +77,7 @@ class SiengeClient:
         if not self.is_configured:
             return None
 
+        self.last_error = None
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for url in self._candidate_urls(endpoint):
@@ -79,6 +93,7 @@ class SiengeClient:
                     return response.json()
                 except Exception as exc:
                     last_error = exc
+                    self._record_error(endpoint=endpoint, url=url, exc=exc)
                     logger.warning("Sienge request failed for %s: %s", url, exc)
 
         if last_error:
@@ -196,6 +211,7 @@ class SiengeClient:
         if not self.is_configured:
             return None
 
+        self.last_error = None
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for url in self._candidate_urls(endpoint):
@@ -212,6 +228,7 @@ class SiengeClient:
                     return response.json()
                 except Exception as exc:
                     last_error = exc
+                    self._record_error(endpoint=endpoint, url=url, exc=exc, params=params)
                     logger.warning("Sienge request failed for %s with params %s: %s", url, params, exc)
 
         if last_error:

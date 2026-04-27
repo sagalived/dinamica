@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" width="80" height="80">
+  <defs>
+    <linearGradient id="gLogo" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#5DBB35;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2D9E2D;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <!-- rounded square background -->
+  <rect x="2" y="2" width="76" height="76" rx="18" ry="18" fill="url(#gLogo)"/>
+  <!-- D shape -->
+  <path d="M20 18 L20 62 L42 62 Q64 62 64 40 Q64 18 42 18 Z
+            M32 28 L41 28 Q52 28 52 40 Q52 52 41 52 L32 52 Z"
+        fill="white"/>
+  <!-- arrow chevron -->
+  <path d="M34 37 L44 40 L34 43" stroke="white" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

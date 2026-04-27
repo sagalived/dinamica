@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="220" viewBox="0 0 220 220" fill="none">
+  <defs>
+    <linearGradient id="brand-green-icon" x1="20" y1="22" x2="170" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2FA535"/>
+      <stop offset="1" stop-color="#8FCC22"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(8 8)">
+    <path d="M30 8H101C147.944 8 186 46.056 186 93C186 139.944 147.944 178 101 178H30C19.507 178 11 169.493 11 159V108C11 97.507 19.507 89 30 89H78L108 89.1L80.3 61H30C19.507 61 11 52.493 11 42V27C11 16.507 19.507 8 30 8Z" fill="url(#brand-green-icon)"/>
+    <path d="M63 47H89.5L124.8 82.5L89.5 118H63L94 82.5L63 47Z" fill="white"/>
+    <path d="M25 89H88.5L115.5 89.1L88.5 116H25C17.268 116 11 109.732 11 102C11 94.268 17.268 88 25 88V89Z" fill="url(#brand-green-icon)"/>
+  </g>
+</svg>

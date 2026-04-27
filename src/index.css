@@ -129,7 +129,28 @@
   html {
     @apply font-sans;
     overflow-x: hidden;
+    scroll-behavior: smooth;
     }
+}
+
+/* Global motion polish for a smoother, more premium feel */
+button,
+a,
+[role="button"],
+input,
+select,
+textarea {
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+button:hover,
+[role="button"]:hover {
+  transform: translateY(-1px);
 }
 
 /* Custom Scrollbar */
@@ -176,13 +197,13 @@
 
 /* Brand accent remap: orange -> green */
 :root {
-  --brand-400: #6cf17b;
-  --brand-500: #3ad64c;
-  --brand-600: #2fbd40;
-  --brand-700: #259734;
-  --brand-900: #173d1d;
-  --brand-500-rgb: 58, 214, 76;
-  --brand-600-rgb: 47, 189, 64;
+  --brand-400: #7dca5d;
+  --brand-500: #4cb232;
+  --brand-600: #3fae2a;
+  --brand-700: #2f8a1f;
+  --brand-900: #0f2b42;
+  --brand-500-rgb: 76, 178, 50;
+  --brand-600-rgb: 63, 174, 42;
 }
 
 .selection\:bg-orange-500\/30::selection,

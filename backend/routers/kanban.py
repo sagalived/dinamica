@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from sqlalchemy import select, delete
+from datetime import datetime
 from pathlib import Path
 import os
 
 from backend.database import get_db
-from backend.models import AppUser, Sprint, Card, Attachment
+from backend.models import AppUser, Sprint, Card, Attachment, Building
 from backend.schemas import SprintRequest, SprintResponse, CardRequest, CardResponse, AttachmentResponse
 from backend.dependencies import get_current_user
 
@@ -81,6 +82,86 @@ def list_sprints_by_building(
         "buildings": {
             building_id: sprints_data
         }
+    }
+
+
+@router.get("/overview")
+def list_sprints_overview(
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Retorna todas as sprints com resumo de prazos/atrasos para painel de alertas."""
+    now = datetime.utcnow()
+
+    sprints = db.scalars(
+        select(Sprint)
+        .options(selectinload(Sprint.cards))
+        .order_by(Sprint.created_at.desc())
+    ).all()
+
+    building_ids = {s.building_id for s in sprints if s.building_id is not None}
+    building_rows = db.scalars(select(Building).where(Building.id.in_(building_ids))).all() if building_ids else []
+    building_name_by_id = {b.id: b.name for b in building_rows}
+
+    done_statuses = {"done", "concluido", "concluído", "completed", "finalizado"}
+
+    overview = []
+    for s in sprints:
+        cards_data = []
+        overdue_cards = 0
+        open_cards = 0
+
+        for c in s.cards:
+            status_normalized = str(c.status or "").strip().lower()
+            is_done = status_normalized in done_statuses
+            is_card_overdue = bool(c.due_date and c.due_date < now and not is_done)
+            if not is_done:
+                open_cards += 1
+            if is_card_overdue:
+                overdue_cards += 1
+
+            cards_data.append(
+                {
+                    "id": c.id,
+                    "title": c.title,
+                    "status": c.status,
+                    "priority": c.priority,
+                    "responsible": c.responsible,
+                    "dueDate": c.due_date.isoformat() if c.due_date else None,
+                    "overdue": is_card_overdue,
+                }
+            )
+
+        sprint_overdue = bool(s.end_date and s.end_date < now and open_cards > 0)
+
+        overview.append(
+            {
+                "id": s.id,
+                "buildingId": s.building_id,
+                "buildingName": building_name_by_id.get(s.building_id) or f"Obra {s.building_id}",
+                "name": s.name,
+                "startDate": s.start_date.isoformat() if s.start_date else None,
+                "endDate": s.end_date.isoformat() if s.end_date else None,
+                "color": s.color,
+                "isActive": s.is_active,
+                "createdAt": s.created_at.isoformat(),
+                "overdue": sprint_overdue,
+                "stats": {
+                    "totalCards": len(cards_data),
+                    "openCards": open_cards,
+                    "overdueCards": overdue_cards,
+                },
+                "cards": cards_data,
+            }
+        )
+
+    return {
+        "sprints": overview,
+        "summary": {
+            "totalSprints": len(overview),
+            "overdueSprints": len([s for s in overview if s["overdue"]]),
+            "overdueCards": sum(s["stats"]["overdueCards"] for s in overview),
+        },
     }
 
 

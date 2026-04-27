@@ -1,5 +1,4 @@
 import { cn } from '../lib/utils';
-import { LayoutDashboard, DollarSign, Building2, Truck, Bell } from 'lucide-react';
 
 interface NavProps {
   activeTab: string;
@@ -15,7 +14,7 @@ export function NavigationMenu({ activeTab, setActiveTab, isRestrictedUser }: Na
           onClick={() => setActiveTab('logistics')}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold uppercase transition-all tracking-wider",
-            activeTab === 'logistics' ? "bg-orange-600 text-white" : "text-gray-400"
+            activeTab === 'logistics' ? "bg-[#4CB232] text-white" : "text-slate-500 hover:text-[#102A40]"
           )}
         >
           LOGÍSTICA
@@ -73,15 +72,15 @@ export function NavigationMenu({ activeTab, setActiveTab, isRestrictedUser }: Na
               className={cn(
                 "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold uppercase transition-all tracking-widest",
                 isActiveContext
-                  ? "bg-orange-600 text-white shadow-lg shadow-orange-600/20"
-                  : "text-gray-400 hover:text-white hover:bg-white/5"
+                  ? "bg-[#4CB232] text-white shadow-lg shadow-[#4CB232]/25"
+                  : "text-slate-500 hover:text-[#102A40] hover:bg-slate-100"
               )}
             >
               <span>{menu.label}</span>
             </button>
             
             <div className="absolute left-0 top-full pt-2 opacity-0 translate-y-2 pointer-events-none group-hover:opacity-100 group-hover:translate-y-0 group-hover:pointer-events-auto transition-all duration-200 z-50">
-              <div className="flex flex-col bg-[#161618] border border-white/10 rounded-xl shadow-2xl p-2 min-w-[220px] gap-1">
+              <div className="flex flex-col bg-white border border-slate-200 rounded-xl shadow-2xl p-2 min-w-[220px] gap-1">
                 {menu.options.map(opt => (
                   <button
                     key={opt.id}
@@ -89,8 +88,8 @@ export function NavigationMenu({ activeTab, setActiveTab, isRestrictedUser }: Na
                     className={cn(
                       "text-left px-4 py-2.5 rounded-lg text-sm font-bold uppercase transition-all tracking-wider",
                       activeTab === opt.id 
-                        ? "bg-orange-600/20 text-orange-500" 
-                        : "text-gray-400 hover:bg-white/5 hover:text-white"
+                        ? "bg-[#4CB232]/15 text-[#2E861E]" 
+                        : "text-slate-600 hover:bg-slate-100 hover:text-[#102A40]"
                     )}
                   >
                     {opt.label}
