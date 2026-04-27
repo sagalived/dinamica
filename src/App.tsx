@@ -1006,7 +1006,7 @@ export default function App() {
         if (effectiveStart) params.start_date = format(effectiveStart, 'yyyy-MM-dd');
         if (effectiveEnd) params.end_date = format(effectiveEnd, 'yyyy-MM-dd');
 
-        const response = await api.get('/sienge/filtered', { params });
+        const response = await api.get('/filtered', { params });
         if (!cancelled) {
           applyServerFilteredData(response.data);
         }
