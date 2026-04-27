@@ -3,7 +3,7 @@ uvicorn==0.34.2
 sqlalchemy==2.0.40
 psycopg[binary]==3.2.13
 pandas==2.2.3
-flet==0.28.3
+httpx==0.28.1
 requests==2.32.3
 python-dotenv==1.0.1
 bcrypt==4.3.0

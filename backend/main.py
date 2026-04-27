@@ -84,8 +84,9 @@ async def on_startup() -> None:
             daemon=True,
         ).start()
         app.state.sienge_scheduler_task = asyncio.create_task(_run_sienge_scheduler())
-    except SQLAlchemyError as exc:
+    except Exception as exc:
         app.state.database_error = str(exc)
+        logger.error("Erro critico no startup: %s", exc, exc_info=True)
 
 
 @app.on_event("shutdown")
