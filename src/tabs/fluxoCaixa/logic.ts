@@ -201,9 +201,7 @@ export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaResult {
       if (!filterByCompany(t, fcSelectedCompany, buildings)) return acc
       if (!filterByAccount(t, fcHideInternal)) return acc
       const rv: number = t.rawValue ?? ((t.type === 'Income' ? 1 : -1) * Math.abs(toMoney(t.amount)))
-      // CORRETO: usa rv com sinal — expenses negativos (estornos/créditos) AUMENTAM o saldo.
-      // Pares GE (ex: TR.1788 com -394.2 e +394.2) cancelam: net = 0.
-      return acc + (t.type === 'Income' ? rv : -rv)
+      return acc + (t.type === 'Income' ? rv : -Math.abs(rv))
     }, 0)
   }
 
@@ -225,11 +223,8 @@ export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaResult {
       (t.type === 'Income' ? 1 : -1) * Math.abs(toMoney(t.amount))
     )
     const isIncome = t.type === 'Income'
-    const entrada = isIncome ? rv : 0  // positivo = entrada, negativo = estorno de entrada
-    // saida usa rv COM SINAL: positivo = saída normal, negativo = estorno/crédito de saída.
-    // Isso permite que pares GE (ex: TR.1788 -394.2 e +394.2) cancelem no saldo acumulado,
-    // replicando o comportamento do relatório PDF do SIENGE.
-    const saida = !isIncome ? rv : 0
+    const entrada = isIncome ? rv : 0           // pode ser negativo (estorno)
+    const saida = !isIncome ? Math.abs(rv) : 0  // sempre positivo na coluna Saída
 
     const titParc = buildTitParc(
       t.documentId || '',

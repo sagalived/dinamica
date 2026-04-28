@@ -3020,7 +3020,7 @@ export default function App() {
                       setFcStartDate(undefined);
                       setFcEndDate(undefined);
                       setFcSelectedCompany('all');
-                      setFcHideInternal(true);
+                      setFcHideInternal(false);
                     }}
                     className="h-11 rounded-xl border-white/10 bg-black/30 text-gray-300 hover:bg-white/10 hover:text-white"
                   >
@@ -3120,13 +3120,9 @@ export default function App() {
                                 ? (row.entrada < 0 ? '-' : '') + Math.abs(row.entrada).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})
                                 : <span className="text-gray-600">—</span>}
                             </TableCell>
-                            <TableCell className={cn(
-                              'text-right font-mono whitespace-nowrap',
-                              row.saida > 0 ? 'text-red-400' :
-                              row.saida < 0 ? 'text-emerald-300' : 'text-gray-600'
-                            )}>
-                              {row.saida !== 0
-                                ? (row.saida < 0 ? '-' : '') + Math.abs(row.saida).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})
+                            <TableCell className="text-right font-mono text-red-400 whitespace-nowrap">
+                              {row.saida > 0
+                                ? row.saida.toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})
                                 : <span className="text-gray-600">—</span>}
                             </TableCell>
                             <TableCell className={cn(
