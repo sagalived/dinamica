@@ -35,8 +35,14 @@ export interface FluxoCaixaRow {
 export interface FluxoCaixaSummary {
   totalEntradas: number
   totalSaidas: number
-  saldoFinal: number
+  saldoAnterior: number   // saldo acumulado ANTES do período selecionado
+  saldoFinal: number      // saldo ao final do último lançamento do período
   registros: number
+}
+
+export interface FluxoCaixaResult {
+  rows: FluxoCaixaRow[]
+  saldoAnterior: number   // saldo acumulado antes do início do período
 }
 
 // ─── Contas internas (ocultar quando fcHideInternal=true) ─────────────────────
@@ -163,14 +169,16 @@ export interface FluxoCaixaInput {
  * Calcula o extrato do Fluxo de Caixa replicando o relatório SIENGE PDF.
  *
  * FÓRMULA:
- *  1. Filtra allReceivableTitles por data, empresa, conta bancária
- *  2. Para cada entrada: rawValue positivo = Income (entrada), negativo = estorno
- *  3. Para cada saída: rawValue positivo = Expense (saída), negativo = estorno de saída
- *  4. Ordena por data ascendente
- *  5. Calcula saldo acumulado em série
- *  6. Fallback: se extrato vazio, usa allFinancialTitles (pagamentos) + allReceivableTitles (recebimentos)
+ *  1. Calcula saldoAnterior: soma tudo em allReceivableTitles ANTES do startNumeric
+ *     (mesmos filtros de empresa/conta) → saldo de abertura do período
+ *  2. Filtra allReceivableTitles por data, empresa, conta bancária (período selecionado)
+ *  3. Para cada entrada: rawValue positivo = Income (entrada), negativo = estorno
+ *  4. Para cada saída: rawValue positivo = Expense (saída), negativo = estorno de saída
+ *  5. Ordena por data ascendente
+ *  6. Calcula saldo acumulado em série, iniciando de saldoAnterior
+ *  7. Fallback: se extrato vazio, usa allFinancialTitles + allReceivableTitles
  */
-export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaRow[] {
+export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaResult {
   const {
     allReceivableTitles,
     allFinancialTitles,
@@ -181,14 +189,30 @@ export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaRow[] {
     endNumeric,
   } = input
 
-  // ── Passo 1: filtra dados do extrato bancário ────────────────────────────────
+  // ── Passo 1: saldoAnterior — soma TUDO antes do startNumeric ───────────────
+  // Replica o "Saldo Anterior" do relatório SIENGE: ao primeiro lançamento do
+  // período, o saldo já parte do acumulado histórico, não de zero.
+  let saldoAnterior = 0
+  if (startNumeric !== null) {
+    saldoAnterior = allReceivableTitles.reduce((acc: number, t: any) => {
+      const dn = t.dueDateNumeric || 0
+      if (!dn) return acc
+      if (dateToNumeric(dn) >= startNumeric) return acc  // só ANTES do período
+      if (!filterByCompany(t, fcSelectedCompany, buildings)) return acc
+      if (!filterByAccount(t, fcHideInternal)) return acc
+      const rv: number = t.rawValue ?? ((t.type === 'Income' ? 1 : -1) * Math.abs(toMoney(t.amount)))
+      return acc + (t.type === 'Income' ? rv : -Math.abs(rv))
+    }, 0)
+  }
+
+  // ── Passo 2: filtra dados do extrato bancário ────────────────────────────────
   const extrato = allReceivableTitles.filter((t: any) =>
     filterByDate(t, startNumeric, endNumeric) &&
     filterByCompany(t, fcSelectedCompany, buildings) &&
     filterByAccount(t, fcHideInternal),
   )
 
-  // ── Passo 2: mapeia para FluxoCaixaRow ───────────────────────────────────────
+  // ── Passo 3: mapeia para FluxoCaixaRow ───────────────────────────────────────
   let rows: FluxoCaixaRow[] = extrato.map((t: any): FluxoCaixaRow => {
     // rawValue preserva o sinal original da API SIENGE:
     //   Income positivo  → entrada real de dinheiro
@@ -272,22 +296,27 @@ export function calcularFluxoCaixa(input: FluxoCaixaInput): FluxoCaixaRow[] {
   // ── Passo 4: ordena por data ASC ────────────────────────────────────────────
   rows.sort((a, b) => (a.dataNumeric || 0) - (b.dataNumeric || 0))
 
-  // ── Passo 5: calcula saldo acumulado ────────────────────────────────────────
-  let saldoAtual = 0
-  return rows.map(row => {
+  // ── Passo 5: calcula saldo acumulado partindo do saldoAnterior ───────────────
+  // CORRETO: o primeiro lançamento do período já parte do saldo histórico,
+  // exatamente como o relatório SIENGE PDF mostra.
+  let saldoAtual = saldoAnterior
+  const rowsComSaldo = rows.map(row => {
     saldoAtual = saldoAtual + row.entrada - row.saida
     return { ...row, saldo: saldoAtual }
   })
+
+  return { rows: rowsComSaldo, saldoAnterior }
 }
 
 /** Sumariza os totais do extrato */
-export function summarizeFluxoCaixa(rows: FluxoCaixaRow[]): FluxoCaixaSummary {
+export function summarizeFluxoCaixa(rows: FluxoCaixaRow[], saldoAnterior = 0): FluxoCaixaSummary {
   const totalEntradas = rows.reduce((acc, r) => acc + r.entrada, 0)
   const totalSaidas = rows.reduce((acc, r) => acc + r.saida, 0)
-  const saldoFinal = rows.length > 0 ? rows[rows.length - 1].saldo : 0
+  const saldoFinal = rows.length > 0 ? rows[rows.length - 1].saldo : saldoAnterior
   return {
     totalEntradas,
     totalSaidas,
+    saldoAnterior,
     saldoFinal,
     registros: rows.length,
   }

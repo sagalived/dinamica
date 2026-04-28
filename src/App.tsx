@@ -1366,7 +1366,8 @@ export default function App() {
   // Não misturar com lógica de outras abas. Para corrigir cálculos, edite
   // apenas esse arquivo.
   // ──────────────────────────────────────────────────────────────────────────
-  const fluxoDeCaixaData = useMemo(() => {
+  // Retorna { rows, saldoAnterior } — ver src/tabs/fluxoCaixa/logic.ts
+  const { rows: fluxoDeCaixaData, saldoAnterior: fluxoDeCaixaSaldoAnterior } = useMemo(() => {
     const fcHasManualDate = Boolean(fcStartDate || fcEndDate);
     const fcEffectiveStart = fcHasManualDate
       ? (fcStartDate || null)
@@ -3140,6 +3141,12 @@ export default function App() {
                 <div className="bg-black/40 border-t border-white/5 p-4 flex justify-between items-center text-sm">
                    <div className="flex gap-6">
                       <div className="flex flex-col">
+                        <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Saldo Anterior</span>
+                        <span className={cn('font-mono font-black', fluxoDeCaixaSaldoAnterior >= 0 ? 'text-sky-400' : 'text-orange-400')}>
+                          {fluxoDeCaixaSaldoAnterior < 0 ? '-' : ''}R$ {Math.abs(fluxoDeCaixaSaldoAnterior).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+                        </span>
+                      </div>
+                      <div className="flex flex-col">
                         <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Total Entradas</span>
                         {/* Soma com sinal: estornos negativos reduzem total (igual ao PDF Sienge) */}
                         <span className="font-mono text-emerald-400 font-black">R$ {fluxoDeCaixaData.reduce((acc, r) => acc + r.entrada, 0).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</span>
@@ -3156,7 +3163,7 @@ export default function App() {
                    <div className="flex flex-col text-right">
                       <span className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Saldo Acumulado do Período</span>
                       {(() => {
-                        const lastSaldo = fluxoDeCaixaData.length > 0 ? fluxoDeCaixaData[fluxoDeCaixaData.length - 1].saldo : 0;
+                        const lastSaldo = fluxoDeCaixaData.length > 0 ? fluxoDeCaixaData[fluxoDeCaixaData.length - 1].saldo : fluxoDeCaixaSaldoAnterior;
                         return (
                           <span className={cn('text-xl font-mono font-black', lastSaldo >= 0 ? 'text-emerald-500' : 'text-red-500')}>
                             {lastSaldo < 0 ? '-' : ''}R$ {Math.abs(lastSaldo).toLocaleString('pt-BR', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
