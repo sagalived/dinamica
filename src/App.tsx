@@ -771,6 +771,11 @@ export default function App() {
   const buildingOptions = useMemo(() => {
     if (!dateRange.start && !dateRange.endExclusive) return buildings;
 
+    // Bootstrap leve: all* vazios → retorna todas as obras para não mostrar "0 encontradas"
+    if (allOrders.length === 0 && allFinancialTitles.length === 0 && allReceivableTitles.length === 0) {
+      return buildings;
+    }
+
     const activeIds = new Set<string>();
     allOrders.forEach(o => {
       if (matchesDateRange(o.dateNumeric)) activeIds.add(String(o.buildingId));
@@ -947,6 +952,12 @@ export default function App() {
     setOrders(filteredOrdersData);
     setFinancialTitles(filteredFinancialData);
     setReceivableTitles(filteredReceivableData);
+
+    // Bootstrap leve não carrega transações → populamos all* na primeira carga para
+    // que buildingOptions, fluxoDeCaixaData e outros consumidores funcionem.
+    setAllOrders(prev => prev.length === 0 ? filteredOrdersData : prev);
+    setAllFinancialTitles(prev => prev.length === 0 ? filteredFinancialData : prev);
+    setAllReceivableTitles(prev => prev.length === 0 ? filteredReceivableData : prev);
   }, []);
 
   // Re-resolve creditor names whenever the creditor list loads (fixes the race with refreshData)
