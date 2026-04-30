@@ -13,7 +13,9 @@ import {
 import { addMonths, endOfDay, format, isValid, parse, startOfDay } from 'date-fns';
 import { cn } from '../../lib/utils';
 import * as XLSX from 'xlsx';
-import { INTERNAL_BANK_ACCOUNTS, extractBankAccountCode } from './logic';
+import { useSienge } from '../../contexts/SiengeContext';
+import { useTheme } from '../../contexts/ThemeContext';
+import { INTERNAL_BANK_ACCOUNTS, extractBankAccountCode } from './leandroLogic';
 
 // ─── Tipos ────────────────────────────────────────────────────────────────────
 
@@ -167,28 +169,29 @@ function parseCsvText(text: string): LeandroRow[] {
 
 // ─── Componente Principal ─────────────────────────────────────────────────────
 
-export function LeandroTab({
-  isDark,
-  allFinancialTitles,
-  allReceivableTitles,
-  orders,
-  buildings,
-  companies,
-  syncing,
-  syncSienge,
-}: LeandroProps) {
+export function LeandroTab() {
+  const { isDark } = useTheme();
+  const { 
+    allFinancialTitles,
+    allReceivableTitles,
+    orders,
+    buildings,
+    companies,
+    loading: syncing,
+    refresh: syncSienge,
+    startDate, setStartDate,
+    endDate, setEndDate,
+    globalPeriodMode: periodMode, setGlobalPeriodMode: setPeriodMode,
+    selectedCompany, setSelectedCompany,
+    fcSelectedBuilding: selectedBuilding, setFcSelectedBuilding: setSelectedBuilding,
+    fcHideInternal: hideInternal, setFcHideInternal: setHideInternal
+  } = useSienge();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedRows, setUploadedRows] = useState<LeandroRow[] | null>(null);
   const [uploadFileName, setUploadFileName] = useState('');
   const [uploadError, setUploadError] = useState('');
   const [uploadLoading, setUploadLoading] = useState(false);
   const [activeSource, setActiveSource] = useState<'sienge' | 'arquivo'>('sienge');
-  const [periodMode, setPeriodMode] = useState<'last6m' | 'all'>('last6m');
-  const [startDate, setStartDate] = useState<Date | undefined>();
-  const [endDate, setEndDate] = useState<Date | undefined>();
-  const [selectedCompany, setSelectedCompany] = useState<string>('all');
-  const [selectedBuilding, setSelectedBuilding] = useState<string>('all');
-  const [hideInternal, setHideInternal] = useState(true);
   const [applyTick, setApplyTick] = useState(0);
   const [detailLimit, setDetailLimit] = useState(500);
 

@@ -190,8 +190,17 @@ export interface PurchaseOrder {
   dateNumeric: number;
   totalAmount: number;
   supplierId?: string | number;
+  creditorId?: string | number;
+  idCredor?: string | number;
+  nomeFornecedor?: string;
+  supplierName?: string;
+  creditorName?: string;
+  valorTotal?: number;
+  amount?: number;
   status: string;
   paymentCondition: string;
+  paymentConditionDescription?: string;
+  condicaoPagamentoDescricao?: string;
   deliveryDate: string;
   internalNotes: string;
   createdBy: string;

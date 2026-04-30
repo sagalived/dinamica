@@ -6,7 +6,7 @@ import logoWordmarkDark from '../assets/dinamica-wordmark-dark.svg';
 import { cn } from '../lib/utils';
 
 type LoginScreenProps = {
-  onLogin: (user: AuthUser) => void;
+  onLogin: (user: AuthUser, token: string) => void;
   themeMode: 'light' | 'dark';
   onToggleTheme: () => void;
 };
@@ -34,7 +34,7 @@ export function LoginScreen({ onLogin, themeMode, onToggleTheme }: LoginScreenPr
       setAuthToken(token);
       const enrichedUser: AuthUser = { ...user, name: (user as any).full_name || (user as any).name };
       setSessionUser(enrichedUser);
-      onLogin(enrichedUser);
+      onLogin(enrichedUser, token);
     } catch (err: any) {
       setError(err?.response?.data?.detail || err?.message || 'Não foi possível entrar.');
     } finally {

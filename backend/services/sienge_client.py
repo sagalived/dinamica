@@ -26,8 +26,8 @@ class SiengeClient:
         self.timeout = 30
         self.last_error: dict[str, Any] | None = None
 
-        self.basic_auth_user = self.access_name or self.username
-        self.basic_auth_password = self.token or self.password
+        self.basic_auth_user = self.username or self.access_name
+        self.basic_auth_password = self.password or self.token
 
         self.use_basic_auth = bool(self.basic_auth_user and self.basic_auth_password)
         self.use_bearer_auth = bool(self.access_name and self.token)
@@ -61,6 +61,11 @@ class SiengeClient:
             headers["X-Access-Name"] = self.access_name
         return headers
 
+    def _get_auth(self) -> tuple[str, str] | None:
+        if self.use_basic_auth:
+            return (self.basic_auth_user, self.basic_auth_password)
+        return None
+
     def _candidate_urls(self, endpoint: str) -> list[str]:
         normalized_base = self.base_url.rstrip("/")
         normalized_endpoint = endpoint if endpoint.startswith("/") else f"/{endpoint}"
@@ -86,7 +91,7 @@ class SiengeClient:
                     response = await client.get(
                         url,
                         headers=self._get_headers(),
-                        auth=(self.basic_auth_user, self.basic_auth_password) if self.use_basic_auth else None,
+                        auth=self._get_auth(),
                     )
                     if response.status_code == 404:
                         continue
@@ -161,12 +166,21 @@ class SiengeClient:
         try:
             payload = await self._get_json("/companies")
             live_ok = bool(self._extract_collection(payload))
+            diagnostic = self.last_error or {}
+            status_code = diagnostic.get("status_code")
+            if status_code == 401:
+                message = "Sienge returned 401: invalid or expired API credentials"
+            elif status_code == 403:
+                message = "Sienge returned 403: API user has no permission for this resource"
+            else:
+                message = "Successfully connected to Sienge API" if live_ok else "Sienge API returned no data"
             return {
                 "ok": live_ok,
                 "live": {
                     "ok": live_ok,
                     "status": "connected" if live_ok else "error",
-                    "message": "Successfully connected to Sienge API" if live_ok else "Sienge API returned no data",
+                    "message": message,
+                    "status_code": status_code,
                 },
                 "cache": {"source": "sienge_live" if live_ok else "fallback", "counts": {}},
             }
@@ -192,71 +206,31 @@ class SiengeClient:
         return await self._fetch_all_pages("/creditors")
 
     async def fetch_pedidos(self) -> list[dict]:
-        return await self._fetch_all_pages("/purchase-orders")
+        six_months_ago = (datetime.now() - timedelta(days=183)).strftime("%Y-%m-%d")
+        one_year_ahead = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
+        params = {"startDate": six_months_ago, "endDate": one_year_ahead}
+        return await self._fetch_all_pages("/purchase-orders", params)
 
     async def fetch_financeiro(self) -> list[dict]:
         """
-        Busca parcelas (installments) de faturas (bills) emitidas nos ultimos 3 anos.
-        Cada parcela representa uma conta a pagar com data de vencimento propria.
-        Usa semaphore para limitar concorrencia e nao sobrecarregar a API.
+        Busca titulos a pagar em uma janela operacional.
+
+        Evita expandir installments de todos os bills no sync inicial: em bases
+        grandes isso dispara dezenas de milhares de chamadas e impede a tela de
+        atualizar. Detalhes pontuais continuam disponiveis por endpoints sob
+        demanda.
         """
-        three_years_ago = (datetime.now() - timedelta(days=365 * 3)).strftime("%Y-%m-%d")
+        six_months_ago = (datetime.now() - timedelta(days=183)).strftime("%Y-%m-%d")
         one_year_ahead  = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
-        params = {"startDate": three_years_ago, "endDate": one_year_ahead}
-
-        bills = await self._fetch_all_pages("/bills", params)
-        if not bills:
-            return []
-
-        semaphore = asyncio.Semaphore(10)  # max 10 requests concurrentes
-
-        async def fetch_bill_installments(bill: dict) -> list[dict]:
-            bill_id = bill.get("id")
-            if not bill_id:
-                return [bill]
-            async with semaphore:
-                raw_inst = await self._get_json(f"/bills/{bill_id}/installments")
-            insts = self._extract_collection(raw_inst) if raw_inst else []
-            if not insts:
-                return [bill]  # fallback: usa o cabecalho sem parcela
-            result = []
-            for inst in insts:
-                merged = dict(bill)
-                merged.update(inst)
-                due = (
-                    inst.get("dueDate")
-                    or inst.get("dataVencimento")
-                    or inst.get("paymentForecast")
-                    or inst.get("anticipatedPaymentDate")
-                    or bill.get("dueDate")
-                    or bill.get("dataVencimento")
-                )
-                merged["dataVencimento"] = due or ""
-                result.append(merged)
-            return result
-
-        tasks = [fetch_bill_installments(b) for b in bills]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        installments_flat: list[dict] = []
-        for idx, res in enumerate(results):
-            if isinstance(res, list):
-                installments_flat.extend(res)
-            elif isinstance(res, dict):
-                installments_flat.append(res)
-            else:
-                # Fallback de resiliencia: se a chamada de installments falhar,
-                # preserva ao menos o bill base para nao "sumir" da tabela.
-                fallback_bill = bills[idx] if idx < len(bills) else None
-                if isinstance(fallback_bill, dict):
-                    installments_flat.append(fallback_bill)
-
-        return installments_flat
+        params = {"startDate": six_months_ago, "endDate": one_year_ahead}
+        return await self._fetch_all_pages("/bills", params)
 
     async def fetch_receber(self) -> list[dict]:
+        six_months_ago = (datetime.now() - timedelta(days=183)).strftime("%Y-%m-%d")
+        one_year_ahead = (datetime.now() + timedelta(days=365)).strftime("%Y-%m-%d")
         params = {
-            "startDate": "1900-01-01",
-            "endDate": "2030-12-31",
+            "startDate": six_months_ago,
+            "endDate": one_year_ahead,
         }
         return await self._fetch_all_pages("/accounts-statements", params)
 
@@ -273,7 +247,7 @@ class SiengeClient:
                         url,
                         headers=self._get_headers(),
                         params=params,
-                        auth=(self.basic_auth_user, self.basic_auth_password) if self.use_basic_auth else None,
+                        auth=self._get_auth(),
                     )
                     if response.status_code == 404:
                         continue

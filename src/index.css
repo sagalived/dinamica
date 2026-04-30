@@ -195,15 +195,26 @@ button:hover,
   -webkit-overflow-scrolling: touch;
 }
 
+
+
+@media (max-width: 1279px) {
+  .tablet-safe-wrap {
+    flex-wrap: wrap;
+    height: auto;
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+  }
+}
+
 /* Brand accent remap: orange -> green */
 :root {
-  --brand-400: #7dca5d;
-  --brand-500: #4cb232;
-  --brand-600: #3fae2a;
-  --brand-700: #2f8a1f;
-  --brand-900: #0f2b42;
-  --brand-500-rgb: 76, 178, 50;
-  --brand-600-rgb: 63, 174, 42;
+  --brand-400: #6cf17b;
+  --brand-500: #3ad64c;
+  --brand-600: #2fbd40;
+  --brand-700: #259734;
+  --brand-900: #173d1d;
+  --brand-500-rgb: 58, 214, 76;
+  --brand-600-rgb: 47, 189, 64;
 }
 
 .selection\:bg-orange-500\/30::selection,
@@ -315,10 +326,6 @@ button:hover,
 .shadow-\[0_20px_50px_rgba\(234\,88\,12\,0\.3\)\] {
   box-shadow: 0 20px 50px rgba(var(--brand-500-rgb), 0.3) !important;
 }
-
-@media (max-width: 1279px) {
-  .tablet-safe-wrap {
-    flex-wrap: wrap;
     height: auto;
     padding-top: 0.75rem;
     padding-bottom: 0.75rem;

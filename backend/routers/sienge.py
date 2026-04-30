@@ -468,13 +468,34 @@ async def _perform_sync(db: Session) -> dict[str, Any]:
     started_at = utc_now_iso()
 
     obras = await sienge_client.fetch_obras()
+    if obras:
+        _write_cached_dataset(db, "obras.json", obras)
+
     usuarios = await sienge_client.fetch_users()
+    if usuarios:
+        _write_cached_dataset(db, "usuarios.json", usuarios)
+
     empresas = await sienge_client.fetch_empresas()
+    if empresas:
+        _write_cached_dataset(db, "empresas.json", empresas)
+
     credores = await sienge_client.fetch_credores()
+    if credores:
+        _write_cached_dataset(db, "credores.json", credores)
+
     pedidos = await sienge_client.fetch_pedidos()
+    if pedidos:
+        _write_cached_dataset(db, "pedidos.json", pedidos)
+
     financeiro = await sienge_client.fetch_financeiro()
+    if financeiro:
+        _write_cached_dataset(db, "financeiro.json", financeiro)
+
     receber = await sienge_client.fetch_receber()
-    itens_pedidos = await sienge_client.fetch_itens_pedidos()
+    if receber:
+        _write_cached_dataset(db, "receber.json", receber)
+
+    itens_pedidos = _read_cached_dataset(db, "itens_pedidos.json", {}) or {}
 
     if not any([obras, usuarios, empresas, credores, pedidos, financeiro, receber, itens_pedidos]):
         cached_counts = _cache_counts(db)
@@ -502,23 +523,6 @@ async def _perform_sync(db: Session) -> dict[str, Any]:
             "synced": False,
             "source": metadata["source"],
         }
-
-    if obras:
-        _write_cached_dataset(db, "obras.json", obras)
-    if usuarios:
-        _write_cached_dataset(db, "usuarios.json", usuarios)
-    if empresas:
-        _write_cached_dataset(db, "empresas.json", empresas)
-    if credores:
-        _write_cached_dataset(db, "credores.json", credores)
-    if pedidos:
-        _write_cached_dataset(db, "pedidos.json", pedidos)
-    if financeiro:
-        _write_cached_dataset(db, "financeiro.json", financeiro)
-    if receber:
-        _write_cached_dataset(db, "receber.json", receber)
-    if itens_pedidos:
-        _write_cached_dataset(db, "itens_pedidos.json", itens_pedidos)
 
     metadata = {
         "status": "success",
@@ -552,14 +556,10 @@ async def test_connection(db: Session = Depends(get_db)) -> dict[str, Any]:
         _ = db.scalar(select(Company).limit(1))
         counts = _cache_counts(db)
         has_cache = any(counts.values())
+        live_result = await sienge_client.test_connection()
+        live = live_result.get("live", {})
         latest_sync = read_sync_metadata(db) or {}
-        sync_status = str(latest_sync.get("status") or "unknown")
-        live_ok = sync_status == "success"
-        live = {
-            "ok": live_ok,
-            "status": sync_status,
-            "message": latest_sync.get("message") or "Sem sincronizacao recente.",
-        }
+        live_ok = bool(live.get("ok"))
         return {
             "ok": live_ok or has_cache,
             "live": live,
