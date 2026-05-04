@@ -17,6 +17,9 @@ data/pedidos.json
 data/itens_pedidos.json
 data/cotacoes_pedidos.json
 data/consolidado.csv
+
+# Exportações locais (integração/ETL)
+assets/camada APiteste/
 __pycache__/
 *.pyc
 .tmp/
