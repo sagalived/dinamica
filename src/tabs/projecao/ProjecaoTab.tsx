@@ -11,14 +11,7 @@ import {
   toMoney,
 } from './logic';
 
-interface FluxoProjectionProps {
-  allFinancialTitles: any[];
-  allReceivableTitles: any[];
-  buildings: any[];
-  companies: any[];
-  syncing: boolean;
-  syncSienge: () => Promise<void>;
-}
+import type { FluxoProjectionProps } from './types';
 
 
 export function FluxoProjection({

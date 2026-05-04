@@ -1,8 +1,12 @@
 from typing import Any
-from datetime import datetime
+from datetime import datetime, timedelta
+import hashlib
 import threading
+import asyncio
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -12,6 +16,7 @@ from backend.models import AppUser, Building, Company, Creditor, DirectoryUser
 from backend.schemas import BootstrapResponse, FetchItemsRequest, FetchQuotationsRequest
 from backend.services.sienge_cache import utc_now_iso
 from backend.services.sienge_client import sienge_client
+from backend.services.mc_by_building_service import compute_mc_by_building
 from backend.services.sienge_storage import (
     read_snapshot,
     read_sync_metadata,
@@ -26,6 +31,209 @@ _SYNC_STATE: dict[str, Any] = {
     "source": None,
     "started_at": None,
 }
+
+
+def _validate_iso_date(value: str, label: str) -> None:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label} deve estar no formato yyyy-MM-dd (ex: 2017-08-13)",
+        )
+
+
+def _add_days_iso(value: str, days: int) -> str:
+    dt = datetime.strptime(value, "%Y-%m-%d") + timedelta(days=days)
+    return dt.strftime("%Y-%m-%d")
+
+
+def _infer_cached_range(items: list[dict[str, Any]], date_fields: list[str]) -> tuple[str | None, str | None]:
+    min_ms: int | None = None
+    max_ms: int | None = None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw = None
+        for key in date_fields:
+            if item.get(key):
+                raw = item.get(key)
+                break
+        ms = _to_date_number(raw)
+        if not ms:
+            continue
+        if min_ms is None or ms < min_ms:
+            min_ms = ms
+        if max_ms is None or ms > max_ms:
+            max_ms = ms
+    if min_ms is None or max_ms is None:
+        return None, None
+    start = datetime.fromtimestamp(min_ms / 1000).strftime("%Y-%m-%d")
+    end = datetime.fromtimestamp(max_ms / 1000).strftime("%Y-%m-%d")
+    return start, end
+
+
+async def _ensure_cached_dataset_range(
+    *,
+    db: Session,
+    dataset_key: str,
+    start_date: str,
+    end_date: str,
+    fetcher,
+    date_fields_for_infer: list[str],
+) -> None:
+    """Garante que o snapshot de um dataset cubra o range solicitado.
+
+    Estratégia: mantém um metadata de cobertura e busca apenas o delta.
+    """
+    if not start_date or not end_date:
+        return
+
+    meta = read_snapshot(db, "sienge_ranges", default={})
+    if not isinstance(meta, dict):
+        meta = {}
+
+    dataset_meta = meta.get(dataset_key)
+    if not isinstance(dataset_meta, dict):
+        dataset_meta = {}
+
+    cached_start = dataset_meta.get("start")
+    cached_end = dataset_meta.get("end")
+
+    existing = _to_array(read_snapshot(db, f"{dataset_key}.json", default=[]))
+
+    # Sempre tenta inferir o range REAL do cache. Isso evita meta "mentindo"
+    # (ex.: meta diz 2026, mas o snapshot foi sobrescrito e só tem 2025).
+    inferred_start: str | None = None
+    inferred_end: str | None = None
+    if existing:
+        inferred_start, inferred_end = _infer_cached_range(existing, date_fields_for_infer)
+
+    if inferred_start and inferred_end:
+        if not cached_start or not cached_end:
+            cached_start, cached_end = inferred_start, inferred_end
+        else:
+            # Se o meta está maior do que o conteúdo real, corrige para o range inferido.
+            # (Isso força o delta a ser buscado e evita respostas vazias/erradas.)
+            if inferred_start > cached_start or inferred_end < cached_end:
+                cached_start, cached_end = inferred_start, inferred_end
+                meta[dataset_key] = {"start": cached_start, "end": cached_end}
+                write_snapshot(db, "sienge_ranges", meta)
+
+    # Se não tem cache, baixa tudo do range solicitado.
+    if not existing or not cached_start or not cached_end:
+        fresh = await fetcher(start_date, end_date)
+        if fresh:
+            write_snapshot(db, f"{dataset_key}.json", fresh)
+            final_start, final_end = _infer_cached_range(fresh, date_fields_for_infer)
+            meta[dataset_key] = {
+                "start": final_start or start_date,
+                "end": final_end or end_date,
+            }
+            write_snapshot(db, "sienge_ranges", meta)
+        return
+
+    missing_ranges: list[tuple[str, str]] = []
+    if start_date < cached_start:
+        missing_ranges.append((start_date, _add_days_iso(cached_start, -1)))
+    if end_date > cached_end:
+        missing_ranges.append((_add_days_iso(cached_end, 1), end_date))
+
+    if not missing_ranges:
+        # mantém meta consistente
+        if dataset_key not in meta:
+            meta[dataset_key] = {"start": cached_start, "end": cached_end}
+            write_snapshot(db, "sienge_ranges", meta)
+        return
+
+    merged: list[dict[str, Any]] = list(existing)
+    seen: set[str] = set()
+    for it in merged:
+        if isinstance(it, dict) and it.get("id") is not None:
+            seen.add(str(it.get("id")))
+
+    changed = False
+    for m_start, m_end in missing_ranges:
+        if m_start > m_end:
+            continue
+        fresh = await fetcher(m_start, m_end)
+        if not fresh:
+            continue
+        for it in fresh:
+            if not isinstance(it, dict):
+                continue
+            iid = it.get("id")
+            key = str(iid) if iid is not None else None
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            merged.append(it)
+            changed = True
+
+    if changed:
+        write_snapshot(db, f"{dataset_key}.json", merged)
+        final_start, final_end = _infer_cached_range(merged, date_fields_for_infer)
+        meta[dataset_key] = {
+            "start": final_start or min(cached_start, start_date),
+            "end": final_end or max(cached_end, end_date),
+        }
+        write_snapshot(db, "sienge_ranges", meta)
+
+
+@router.get("/nfe/documents")
+async def list_nfe_documents(
+    startDate: str = Query(..., description="Data inicial da busca (data de emissão) - yyyy-MM-dd"),
+    endDate: str = Query(..., description="Data final da busca (data de emissão) - yyyy-MM-dd"),
+    limit: int = Query(100, ge=1, le=200, description="Quantidade máxima de resultados (max 200)"),
+    offset: int = Query(0, ge=0, description="Deslocamento na lista"),
+    companyId: int | None = Query(None, description="ID da empresa"),
+    supplierId: int | None = Query(None, description="ID do fornecedor"),
+    documentId: str | None = Query(None, description="ID do documento"),
+    series: str | None = Query(None, description="Série da nota fiscal"),
+    number: str | None = Query(None, description="Número da nota fiscal"),
+    current_user: AppUser = Depends(get_current_user),
+) -> Any:
+    _validate_iso_date(startDate, "startDate")
+    _validate_iso_date(endDate, "endDate")
+
+    payload = await sienge_client.fetch_nfe_documents(
+        startDate=startDate,
+        endDate=endDate,
+        limit=limit,
+        offset=offset,
+        companyId=companyId,
+        supplierId=supplierId,
+        documentId=documentId,
+        series=series,
+        number=number,
+    )
+
+    if payload is None:
+        return {
+            "resultSetMetadata": {"count": 0, "offset": offset, "limit": limit},
+            "results": [],
+            "source": "fallback",
+            "diagnostic": sienge_client.last_error,
+        }
+
+    if isinstance(payload, list):
+        return {
+            "resultSetMetadata": {"count": len(payload), "offset": offset, "limit": limit},
+            "results": payload,
+            "source": "sienge_live",
+        }
+
+    if isinstance(payload, dict):
+        payload.setdefault("source", "sienge_live")
+        return payload
+
+    return {
+        "resultSetMetadata": {"count": 0, "offset": offset, "limit": limit},
+        "results": [],
+        "source": "fallback",
+        "diagnostic": sienge_client.last_error,
+    }
 
 
 def _to_array(payload: Any) -> list[dict]:
@@ -53,6 +261,58 @@ def _read_cached_dataset(db: Session, filename: str, default: Any) -> Any:
 
 def _write_cached_dataset(db: Session, filename: str, payload: Any) -> None:
     write_snapshot(db, filename, payload)
+
+
+def _bill_buildings_cost_cache_key(bill_id: str) -> str:
+    safe = "".join(ch for ch in str(bill_id) if ch.isdigit()) or str(bill_id)
+    return f"bills_buildings_cost/{safe}.json"
+
+
+def _extract_buildings_cost_rows(payload: Any) -> list[dict[str, Any]]:
+    """Normaliza payloads variados do Sienge para uma lista de linhas."""
+    if payload is None:
+        return []
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict) and isinstance(data.get("results"), list):
+            return [x for x in data["results"] if isinstance(x, dict)]
+        if isinstance(payload.get("results"), list):
+            return [x for x in payload["results"] if isinstance(x, dict)]
+        if isinstance(payload.get("buildingsCost"), list):
+            return [x for x in payload["buildingsCost"] if isinstance(x, dict)]
+        if isinstance(payload.get("data"), list):
+            return [x for x in payload["data"] if isinstance(x, dict)]
+    if isinstance(payload, list):
+        return [x for x in payload if isinstance(x, dict)]
+    return []
+
+
+def _weights_from_buildings_cost(rows: list[dict[str, Any]]) -> list[tuple[str, float]]:
+    """Extrai pesos de rateio por obra.
+
+    Retorna lista de (building_id, weight). O weight pode vir de % ou valor.
+    """
+    out: list[tuple[str, float]] = []
+    for r in rows:
+        bid = r.get("buildingId") or r.get("enterpriseId") or r.get("idObra") or r.get("building")
+        bid_str = str(bid or "").strip()
+        if not bid_str or bid_str in {"None", "undefined", "null"}:
+            continue
+
+        pct = r.get("percentage") or r.get("costPercentage") or r.get("percent") or r.get("rate")
+        val = r.get("value") or r.get("costValue") or r.get("amount") or r.get("valor")
+        pct_f = _safe_float(pct, 0.0)
+        if pct_f:
+            out.append((bid_str, pct_f))
+            continue
+
+        val_f = _safe_float(val, 0.0)
+        if val_f:
+            out.append((bid_str, val_f))
+            continue
+
+        out.append((bid_str, 1.0))
+    return out
 
 
 def _cache_counts(db: Session) -> dict[str, int]:
@@ -624,11 +884,59 @@ async def filtered_data(
     start_date: str | None = None,
     end_date: str | None = None,
     company_id: str = "all",
+    building_id: str = "all",
     user_id: str = "all",
     requester_id: str = "all",
     current_user: AppUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    if start_date:
+        _validate_iso_date(start_date, "start_date")
+    if end_date:
+        _validate_iso_date(end_date, "end_date")
+    if start_date and end_date and end_date < start_date:
+        raise HTTPException(status_code=422, detail="end_date deve ser >= start_date")
+
+    # Cache incremental: se pedirem um range fora do cache, baixa só o delta.
+    if start_date and end_date and sienge_client.is_configured:
+        await _ensure_cached_dataset_range(
+            db=db,
+            dataset_key="pedidos",
+            start_date=start_date,
+            end_date=end_date,
+            fetcher=sienge_client.fetch_pedidos_range,
+            date_fields_for_infer=["data", "dataEmissao", "date"],
+        )
+        await _ensure_cached_dataset_range(
+            db=db,
+            dataset_key="financeiro",
+            start_date=start_date,
+            end_date=end_date,
+            fetcher=sienge_client.fetch_financeiro_range,
+            date_fields_for_infer=[
+                "dataVencimento",
+                "dueDate",
+                "issueDate",
+                "dataEmissao",
+                "dataContabil",
+            ],
+        )
+        await _ensure_cached_dataset_range(
+            db=db,
+            dataset_key="receber",
+            start_date=start_date,
+            end_date=end_date,
+            fetcher=sienge_client.fetch_receber_range,
+            date_fields_for_infer=[
+                "dataVencimento",
+                "dueDate",
+                "data",
+                "date",
+                "issueDate",
+                "dataEmissao",
+            ],
+        )
+
     payload = _legacy_bootstrap_payload(db)
 
     obras = _to_array(payload.get("obras", []))
@@ -645,6 +953,7 @@ async def filtered_data(
             str(obra.get("id") or ""),
             str(obra.get("code") or ""),
             str(obra.get("codigoVisivel") or ""),
+            str(obra.get("codigo") or ""),
         }
         for bid in id_candidates:
             if bid and bid not in {"None", "undefined"}:
@@ -653,11 +962,183 @@ async def filtered_data(
     start_ms = _date_start_ms(start_date)
     end_exclusive_ms = _date_end_exclusive_ms(end_date)
 
+    building_aliases: set[str] | None = None
+    if building_id != "all":
+        normalized_buildings = [_normalize_building(obra) for obra in obras]
+        selected = next(
+            (
+                b
+                for b in normalized_buildings
+                if str(b.get("id") or "") == building_id
+                or str(b.get("code") or "") == building_id
+                or str(b.get("codigoVisivel") or "") == building_id
+            ),
+            None,
+        )
+        if selected:
+            building_aliases = {
+                str(selected.get("id") or ""),
+                str(selected.get("code") or ""),
+                str(selected.get("codigoVisivel") or ""),
+            }
+            building_aliases = {bid for bid in building_aliases if bid and bid not in {"None", "undefined"}}
+        else:
+            building_aliases = {building_id}
+
+    def matches_building(item: dict[str, Any]) -> bool:
+        if building_aliases is None:
+            return True
+        bid = str(
+            item.get("buildingId")
+            or item.get("idObra")
+            or item.get("codigoVisivelObra")
+            or item.get("codigoObra")
+            or item.get("enterpriseId")
+            or ""
+        )
+        return bid in building_aliases
+
+    def _auth_fingerprint() -> str:
+        raw = f"{getattr(sienge_client, 'access_name', '')}:{getattr(sienge_client, 'token', '')}"
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:10]
+
+    async def _ensure_buildings_cost_cached(
+        bill_ids: list[str],
+        *,
+        max_concurrency: int = 8,
+        time_budget_s: int = 12,
+        max_fetch: int = 200,
+    ) -> None:
+        """Busca rateios faltantes e cacheia em snapshots.
+
+        Mantém hard cap de tempo para evitar travar a UI.
+        """
+        if not bill_ids or not sienge_client.is_configured:
+            return
+
+        cursor_key = "bills_buildings_cost_cursor.json"
+        cursor_payload = read_snapshot(db, cursor_key, default={}) or {}
+        try:
+            cursor = int(cursor_payload.get("cursor") or 0)
+        except (TypeError, ValueError):
+            cursor = 0
+
+        negative_404_ttl_s = 24 * 60 * 60
+        auth_fp = _auth_fingerprint()
+
+        to_fetch: list[str] = []
+        seen_local: set[str] = set()
+        for bid in bill_ids:
+            if not bid or bid in {"None", "undefined", "null", "0"}:
+                continue
+            if bid in seen_local:
+                continue
+            seen_local.add(bid)
+            key = _bill_buildings_cost_cache_key(bid)
+            cached = read_snapshot(db, key, default=None)
+            if cached is None:
+                to_fetch.append(bid)
+                continue
+
+            # Negative cache para 404 (evita refetch infinito).
+            if isinstance(cached, dict) and cached.get("_status") == 404:
+                cached_at = str(cached.get("_cached_at") or "")
+                cached_fp = str(cached.get("_auth_fp") or "")
+                try:
+                    age_s = (datetime.now() - datetime.fromisoformat(cached_at.replace("Z", "+00:00"))).total_seconds()
+                except Exception:
+                    age_s = None
+                if cached_fp != auth_fp or age_s is None or age_s > negative_404_ttl_s:
+                    to_fetch.append(bid)
+
+        if not to_fetch:
+            return
+
+        # Cursor para varrer progressivamente a lista (se a UI repetir o filtro,
+        # seguimos de onde parou, em vez de sempre pegar os mesmos billIds).
+        if to_fetch:
+            start = cursor % len(to_fetch)
+            to_fetch = to_fetch[start:] + to_fetch[:start]
+
+        to_fetch = to_fetch[: max_fetch if max_fetch > 0 else 0]
+        if not to_fetch:
+            return
+
+        started = datetime.now()
+        processed_fetch = 0
+
+        async def _fetch_one(bid: str, client: httpx.AsyncClient) -> None:
+            payload, err = await sienge_client.fetch_bill_buildings_cost_with_client_detailed(client, bid)
+            nonlocal processed_fetch
+            processed_fetch += 1
+            if payload is not None and err is None:
+                write_snapshot(db, _bill_buildings_cost_cache_key(bid), payload)
+                return
+            if isinstance(err, dict) and err.get("status_code") == 404:
+                write_snapshot(
+                    db,
+                    _bill_buildings_cost_cache_key(bid),
+                    {
+                        "_status": 404,
+                        "_cached_at": utc_now_iso(),
+                        "_endpoint": err.get("endpoint"),
+                        "_auth_fp": auth_fp,
+                    },
+                )
+
+        async with httpx.AsyncClient(timeout=sienge_client.timeout) as client:
+            idx = 0
+            while idx < len(to_fetch):
+                if (datetime.now() - started).total_seconds() >= time_budget_s:
+                    break
+                batch = to_fetch[idx : idx + max_concurrency]
+                idx += len(batch)
+                await asyncio.gather(*[asyncio.create_task(_fetch_one(bid, client)) for bid in batch], return_exceptions=True)
+
+        if processed_fetch:
+            write_snapshot(db, cursor_key, {"cursor": cursor + processed_fetch, "updated_at": utc_now_iso()})
+
+    def _bill_weights(bill_id: str) -> list[tuple[str, float]]:
+        if not bill_id:
+            return []
+        cached = read_snapshot(db, _bill_buildings_cost_cache_key(bill_id), default=None)
+        rows = _extract_buildings_cost_rows(cached)
+        return _weights_from_buildings_cost(rows)
+
+    def _select_allocations(bill_id: str, amount: float) -> list[tuple[str, float]]:
+        weights = _bill_weights(bill_id)
+        if not weights:
+            return []
+        total = sum(abs(w) for _, w in weights) or 0.0
+        if total <= 0:
+            return []
+        out: list[tuple[str, float]] = []
+        for bid, w in weights:
+            frac = abs(w) / total
+            out.append((bid, amount * frac))
+        return out
+
     def order_company(order: dict[str, Any]) -> str:
         direct = order.get("companyId")
         if direct is not None and str(direct) not in {"", "None", "undefined"}:
             return str(direct)
-        bid = str(order.get("buildingId") or order.get("idObra") or order.get("codigoVisivelObra") or "")
+
+        # Fallback: alguns payloads carregam company apenas via links
+        links = order.get("links") or []
+        if isinstance(links, list):
+            linked = _extract_company_id_from_links(links)
+            if linked is not None:
+                return str(linked)
+
+        bid = str(
+            order.get("buildingId")
+            or order.get("buildingCode")
+            or order.get("idObra")
+            or order.get("codigoVisivelObra")
+            or order.get("codigoObra")
+            or order.get("enterpriseId")
+            or ""
+        )
         return building_company_map.get(bid, "")
 
     filtered_orders = []
@@ -667,6 +1148,8 @@ async def filtered_data(
             continue
         if company_id != "all" and order_company(order) != company_id:
             continue
+        if not matches_building(order):
+            continue
         if user_id != "all" and str(order.get("buyerId") or order.get("idComprador") or "") != user_id:
             continue
         if requester_id != "all" and str(order.get("requesterId") or order.get("solicitante") or "") != requester_id:
@@ -675,43 +1158,161 @@ async def filtered_data(
 
     def financial_company(item: dict[str, Any]) -> str:
         direct = item.get("companyId")
+        if direct is None:
+            direct = item.get("company_id")
         if direct is not None and str(direct) not in {"", "None", "undefined"}:
             return str(direct)
-        bid = str(item.get("buildingId") or item.get("idObra") or item.get("codigoObra") or "")
+
+        # Fallback: alguns títulos retornam companyId apenas no links rel=company
+        links = item.get("links") or []
+        if isinstance(links, list):
+            linked = _extract_company_id_from_links(links)
+            if linked is not None:
+                return str(linked)
+
+        bid = str(
+            item.get("buildingId")
+            or item.get("buildingCode")
+            or item.get("idObra")
+            or item.get("codigoVisivelObra")
+            or item.get("codigoObra")
+            or item.get("enterpriseId")
+            or ""
+        )
         return building_company_map.get(bid, "")
 
     filtered_financial = []
-    for item in financeiro:
-        date_numeric = _to_date_number(
-            item.get("dataVencimento")
-            or item.get("dueDate")
-            or item.get("issueDate")
-            or item.get("dataVencimentoProjetado")
-            or item.get("dataEmissao")
-            or item.get("dataContabil")
-        )
-        if not _in_range(date_numeric, start_ms, end_exclusive_ms):
-            continue
-        if company_id != "all" and financial_company(item) != company_id:
-            continue
-        filtered_financial.append(item)
+    if building_aliases is None:
+        for item in financeiro:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+                or item.get("dataEmissao")
+                or item.get("dataContabil")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            filtered_financial.append(item)
+    else:
+        # Rateio por obra via buildings-cost (bills geralmente não têm obra direta).
+        bill_ids: list[str] = []
+        seen_bill_ids: set[str] = set()
+        for item in financeiro:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+                or item.get("dataEmissao")
+                or item.get("dataContabil")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            bid = str(item.get("id") or item.get("billId") or item.get("bill_id") or "").strip()
+            if bid and bid not in seen_bill_ids:
+                seen_bill_ids.add(bid)
+                bill_ids.append(bid)
+
+        await _ensure_buildings_cost_cached(bill_ids)
+
+        for item in financeiro:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+                or item.get("dataEmissao")
+                or item.get("dataContabil")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            bill_id = str(item.get("id") or item.get("billId") or item.get("bill_id") or "").strip()
+            amount = _safe_float(item.get("valor") or item.get("amount") or item.get("value") or 0)
+            for alloc_building, alloc_amount in _select_allocations(bill_id, amount):
+                if alloc_building not in building_aliases:
+                    continue
+                cloned = dict(item)
+                cloned["buildingId"] = int(alloc_building) if alloc_building.isdigit() else 0
+                cloned["idObra"] = int(alloc_building) if alloc_building.isdigit() else 0
+                cloned["codigoObra"] = alloc_building
+                cloned["valor"] = alloc_amount
+                filtered_financial.append(cloned)
 
     filtered_receber = []
-    for item in receber:
-        date_numeric = _to_date_number(
-            item.get("dataVencimento")
-            or item.get("dueDate")
-            or item.get("data")
-            or item.get("date")
-            or item.get("dataEmissao")
-            or item.get("issueDate")
-            or item.get("dataVencimentoProjetado")
-        )
-        if not _in_range(date_numeric, start_ms, end_exclusive_ms):
-            continue
-        if company_id != "all" and financial_company(item) != company_id:
-            continue
-        filtered_receber.append(item)
+    if building_aliases is None:
+        for item in receber:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("data")
+                or item.get("date")
+                or item.get("dataEmissao")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            filtered_receber.append(item)
+    else:
+        bill_ids: list[str] = []
+        seen_bill_ids: set[str] = set()
+        for item in receber:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("data")
+                or item.get("date")
+                or item.get("dataEmissao")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            bid = str(item.get("billId") or item.get("bill_id") or "").strip()
+            if bid and bid not in seen_bill_ids:
+                seen_bill_ids.add(bid)
+                bill_ids.append(bid)
+
+        await _ensure_buildings_cost_cached(bill_ids)
+
+        for item in receber:
+            date_numeric = _to_date_number(
+                item.get("dataVencimento")
+                or item.get("dueDate")
+                or item.get("data")
+                or item.get("date")
+                or item.get("dataEmissao")
+                or item.get("issueDate")
+                or item.get("dataVencimentoProjetado")
+            )
+            if not _in_range(date_numeric, start_ms, end_exclusive_ms):
+                continue
+            if company_id != "all" and financial_company(item) != company_id:
+                continue
+            bill_id = str(item.get("billId") or item.get("bill_id") or "").strip()
+            raw_value = _safe_float(item.get("rawValue") if item.get("rawValue") is not None else item.get("valor") or item.get("amount") or 0)
+            for alloc_building, alloc_amount in _select_allocations(bill_id, raw_value):
+                if alloc_building not in building_aliases:
+                    continue
+                cloned = dict(item)
+                cloned["buildingId"] = int(alloc_building) if alloc_building.isdigit() else 0
+                cloned["idObra"] = int(alloc_building) if alloc_building.isdigit() else 0
+                cloned["codigoObra"] = alloc_building
+                cloned["rawValue"] = alloc_amount
+                cloned["valor"] = abs(alloc_amount)
+                filtered_receber.append(cloned)
 
     return {
         "pedidos": filtered_orders,
@@ -731,6 +1332,63 @@ async def filtered_data(
             "receber": len(filtered_receber),
         },
     }
+
+
+@router.get("/mc-by-building")
+async def mc_by_building(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    company_id: str = "all",
+    building_id: str = "all",
+    user_id: str = "all",
+    requester_id: str = "all",
+    top: int = Query(5, ge=1, le=50),
+    debug: bool = Query(False, description="Quando true, inclui diagnóstico detalhado do rateio por obra"),
+    time_budget_seconds: int = Query(90, ge=10, le=240, description="Tempo máximo (s) para buscar rateios faltantes antes de responder"),
+    max_concurrency: int = Query(10, ge=2, le=50, description="Concorrência máxima de chamadas ao Sienge (valores altos tendem a gerar 429)"),
+    current_user: AppUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """TOP obras por Receita Operacional, com MC e %MC.
+
+    Receita Operacional: soma de títulos a receber que parecem NF (heurística do front).
+    Custos: despesas do extrato bancário (accounts-statements) com type=Expense.
+    Rateio por obra: via GET /bills/{billId}/buildings-cost (cacheado em snapshot).
+    """
+
+    # IMPORTANTE:
+    # Os títulos a pagar (bills) frequentemente NÃO trazem vínculo direto com obra.
+    # Se aplicarmos company_id/building_id aqui, podemos zerar o financeiro e quebrar
+    # o rateio por obra (buildings-cost). Portanto, buscamos o dataset base SEM esses
+    # filtros e deixamos o serviço aplicar a filtragem no nível da OBRA após o rateio.
+    filtered = await filtered_data(
+        start_date=start_date,
+        end_date=end_date,
+        company_id="all",
+        building_id="all",
+        user_id=user_id,
+        requester_id=requester_id,
+        current_user=current_user,
+        db=db,
+    )
+    filtered.setdefault("filters", {})
+    filtered["filters"].update(
+        {
+            "company_id": company_id,
+            "building_id": building_id,
+            "user_id": user_id,
+            "requester_id": requester_id,
+        }
+    )
+
+    return await compute_mc_by_building(
+        filtered=filtered,
+        db=db,
+        top=top,
+        debug=debug,
+        time_budget_seconds=time_budget_seconds,
+        max_concurrency=max_concurrency,
+    )
 
 
 @router.post("/fetch-items")

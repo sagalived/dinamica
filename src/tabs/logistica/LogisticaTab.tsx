@@ -1,7 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Truck, MapPin, Wrench, Fuel, Plus, Trash2, Calendar, FileText, Route } from 'lucide-react';
 import { format } from 'date-fns';
-import { sienge as api, type Building, type LogisticsLocation } from '../../lib/api';
+import { sienge as api } from '../../lib/api';
+import type { Building, LogisticsLocation } from '../../lib/types';
 import { useSienge } from '../../contexts/SiengeContext';
 import { fixText } from '../../lib/text';
 import {
@@ -19,33 +20,7 @@ import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 
-interface LogisticsEntry {
-  id: string;
-  date: string;
-  type: 'combustivel' | 'manutencao' | 'rota' | 'outros';
-  vehicle: string;
-  user: string;
-  cost: number;
-  routeStart?: string;
-  routeEnd?: string;
-  fuelConsumed?: number;
-  notes?: string;
-}
-
-type RouteOption = {
-  value: string;
-  label: string;
-  code?: string;
-  address?: string;
-  latitude?: number;
-  longitude?: number;
-  type?: string;
-};
-
-type RouteEstimate = {
-  km: number | null;
-  provider: string;
-};
+import type { LogisticsEntry, RouteEstimate, RouteOption } from './types';
 
 export function LogisticsTab({ readOnly = false }: { readOnly?: boolean }) {
   const { buildings } = useSienge();

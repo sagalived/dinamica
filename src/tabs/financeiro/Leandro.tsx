@@ -17,42 +17,7 @@ import { useSienge } from '../../contexts/SiengeContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { INTERNAL_BANK_ACCOUNTS, extractBankAccountCode } from './leandroLogic';
 
-// ─── Tipos ────────────────────────────────────────────────────────────────────
-
-interface LeandroRow {
-  id?: string | number;
-  data: string;
-  baixa?: string;
-  vencto?: string;
-  companyId?: string;
-  historico: string;
-  clienteFornecedor?: string;
-  tituloParcela?: string;
-  documento?: string;
-  obra: string;
-  obraId?: string;
-  entrada: number;
-  saida: number;
-  saldo: number;
-}
-
-interface LeandroPeriod {
-  mes: string;
-  entradas: number;
-  saidas: number;
-  saldo: number;
-}
-
-interface LeandroProps {
-  isDark: boolean;
-  allFinancialTitles: any[];
-  allReceivableTitles: any[];
-  orders: any[];
-  buildings: any[];
-  companies: any[];
-  syncing: boolean;
-  syncSienge: () => Promise<void>;
-}
+import type { LeandroPeriod, LeandroProps, LeandroRow } from './types';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

@@ -3,7 +3,7 @@
  * Ao adicionar um novo campo de estado no App.tsx, adicione aqui também.
  */
 
-import type { Building, User, Creditor, PurchaseOrder, PriceAlert, AuthUser } from '../lib/api';
+import type { AuthUser, Building, Creditor, PriceAlert, PurchaseOrder, User } from '../lib/types';
 
 export interface SharedTabProps {
   isDark: boolean;

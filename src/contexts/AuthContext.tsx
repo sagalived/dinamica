@@ -1,5 +1,15 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { sienge as api, kanbanApi, type AuthUser } from '../lib/api';
+import {
+  api,
+  clearAuthToken,
+  clearSessionUser as clearStoredSessionUser,
+  getAuthToken,
+  getSessionUser as getStoredSessionUser,
+  setAuthToken,
+  setSessionUser as setStoredSessionUser,
+} from '../lib/api';
+
+import type { AuthUser } from '../lib/types';
 
 interface AuthContextData {
   sessionUser: AuthUser | null;
@@ -21,17 +31,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const isRestrictedUser = sessionUser?.role === 'user';
 
   const checkAuth = useCallback(async () => {
-    const token = localStorage.getItem('dinamica_token');
-    const storedUser = localStorage.getItem('dinamica_user');
-    
+    const token = getAuthToken();
+    const storedUser = getStoredSessionUser();
+
     if (token && storedUser) {
       try {
-        api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-        kanbanApi.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-        
+        // Valida o token no backend (se inválido, faz logout)
         const response = await api.get('/auth/me');
-        if (response.data && response.data.user) {
-          setSessionUser(response.data.user);
+        const user = (response.data && response.data.user) ? (response.data.user as AuthUser) : null;
+        if (user) {
+          setSessionUser({ ...user, name: (user as any).full_name || (user as any).name });
         } else {
           logout();
         }
@@ -50,18 +59,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [checkAuth]);
 
   const login = useCallback((user: AuthUser, token: string) => {
-    localStorage.setItem('dinamica_token', token);
-    localStorage.setItem('dinamica_user', JSON.stringify(user));
-    api.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    kanbanApi.defaults.headers.common['Authorization'] = `Bearer ${token}`;
-    setSessionUser(user);
+    setAuthToken(token);
+    const enrichedUser: AuthUser = { ...user, name: (user as any).full_name || (user as any).name };
+    setStoredSessionUser(enrichedUser);
+    setSessionUser(enrichedUser);
   }, []);
 
   const logout = useCallback(() => {
-    localStorage.removeItem('dinamica_token');
-    localStorage.removeItem('dinamica_user');
-    delete api.defaults.headers.common['Authorization'];
-    delete kanbanApi.defaults.headers.common['Authorization'];
+    clearAuthToken();
+    clearStoredSessionUser();
     setSessionUser(null);
   }, []);
 

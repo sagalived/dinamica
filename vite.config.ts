@@ -16,6 +16,8 @@ export default defineConfig(({mode}) => {
       },
     },
     server: {
+      // Permite acessar o dev server via IP da máquina (não só localhost)
+      host: true,
       proxy: {
         '/api': {
           target: 'http://127.0.0.1:8000',

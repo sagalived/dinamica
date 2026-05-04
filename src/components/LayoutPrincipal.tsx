@@ -21,9 +21,10 @@ export function LayoutPrincipal() {
   const location = useLocation();
   const navigate = useNavigate();
   const path = location.pathname;
+  const isDashboardGeral = path === '/';
 
   const {
-    syncSienge, syncing, apiStatus,
+    syncSienge, syncing, syncProgress, apiStatus,
     globalPeriodMode, setGlobalPeriodMode,
     startDate, setStartDate, endDate, setEndDate,
     selectedCompany, setSelectedCompany,
@@ -34,6 +35,13 @@ export function LayoutPrincipal() {
   } = useSienge();
 
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
+
+  useEffect(() => {
+    // Na aba Dashboard/Geral esses filtros não são usados.
+    if (!isDashboardGeral) return;
+    if (selectedUser !== 'all') setSelectedUser('all');
+    if (selectedRequester !== 'all') setSelectedRequester('all');
+  }, [isDashboardGeral, selectedRequester, selectedUser, setSelectedRequester, setSelectedUser]);
 
   const availableTabs = useMemo(() => (
     isRestrictedUser
@@ -70,6 +78,21 @@ export function LayoutPrincipal() {
   };
 
   const showFilters = !['/logistica', '/acessos', '/obras/diario', '/financeiro/fluxo', '/financeiro/leandro'].includes(path);
+
+  const buildingFilterOptions = useMemo(() => {
+    if (selectedCompany === 'all') return buildings;
+    return (buildings || []).filter((b: any) => String(b?.companyId) === String(selectedCompany));
+  }, [buildings, selectedCompany]);
+
+  useEffect(() => {
+    if (!showFilters) return;
+    if (selectedCompany === 'all') return;
+    if (fcSelectedBuilding === 'all') return;
+    const selected = (buildings || []).find((b: any) => String(b?.id) === String(fcSelectedBuilding));
+    if (selected && String(selected?.companyId) !== String(selectedCompany)) {
+      setFcSelectedBuilding('all');
+    }
+  }, [buildings, fcSelectedBuilding, selectedCompany, setFcSelectedBuilding, showFilters]);
 
   const downloadData = () => {
     // Moved to Context or we can re-implement here later
@@ -156,12 +179,24 @@ export function LayoutPrincipal() {
               onClick={syncSienge}
               disabled={syncing}
               className={cn(
-                "text-white font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2 shrink-0 min-w-[176px]",
+                "relative overflow-hidden text-white font-bold rounded-xl h-11 px-3 2xl:px-4 gap-2 shrink-0 min-w-[176px]",
                 isDark ? "bg-[#1B3C58] hover:bg-[#234b6e]" : "bg-[#102A40] hover:bg-[#173A57]"
               )}
             >
-              <RefreshCw size={16} className={cn(syncing && "animate-spin")} />
-              <span>{syncing ? "Atualizando..." : "Atualizar Dados"}</span>
+              {syncing && (
+                <span
+                  aria-hidden
+                  className={cn(
+                    "absolute inset-y-0 left-0",
+                    isDark ? "bg-white/10" : "bg-white/20"
+                  )}
+                  style={{ width: `${Math.max(0, Math.min(100, syncProgress || 0))}%` }}
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-2">
+                <RefreshCw size={16} className={cn(syncing && "animate-spin")} />
+                <span>{syncing ? "Atualizando..." : "Atualizar Dados"}</span>
+              </span>
             </Button>
             
             <Button
@@ -320,42 +355,46 @@ export function LayoutPrincipal() {
                     </SelectTrigger>
                     <SelectContent className="bg-[#161618] border-white/10 text-white">
                       <SelectItem value="all">Todas as Obras</SelectItem>
-                      {buildings?.map((b: any) => (
+                      {buildingFilterOptions?.map((b: any) => (
                         <SelectItem key={`obra-${b.id}`} value={String(b.id)}>{b.name || `Obra ${b.id}`}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 </div>
 
-                <div className="space-y-2 flex-1 min-w-[180px]">
-                  <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Comprador</Label>
-                  <Select value={selectedUser} onValueChange={setSelectedUser}>
-                    <SelectTrigger className="w-full bg-black/40 border-white/10 h-11 rounded-xl text-white font-bold">
-                      <span className="truncate">{selectedUser === 'all' ? 'Todos' : users?.find((u: any) => String(u.id) === selectedUser)?.name || 'Todos'}</span>
-                    </SelectTrigger>
-                    <SelectContent className="bg-[#161618] border-white/10 text-white">
-                      <SelectItem value="all">Todos os Compradores</SelectItem>
-                      {users?.map((u: any) => (
-                        <SelectItem key={`user-${u.id}`} value={String(u.id)}>{u.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                {!isDashboardGeral && (
+                  <>
+                    <div className="space-y-2 flex-1 min-w-[180px]">
+                      <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Comprador</Label>
+                      <Select value={selectedUser} onValueChange={setSelectedUser}>
+                        <SelectTrigger className="w-full bg-black/40 border-white/10 h-11 rounded-xl text-white font-bold">
+                          <span className="truncate">{selectedUser === 'all' ? 'Todos' : users?.find((u: any) => String(u.id) === selectedUser)?.name || 'Todos'}</span>
+                        </SelectTrigger>
+                        <SelectContent className="bg-[#161618] border-white/10 text-white">
+                          <SelectItem value="all">Todos os Compradores</SelectItem>
+                          {users?.map((u: any) => (
+                            <SelectItem key={`user-${u.id}`} value={String(u.id)}>{u.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
 
-                <div className="space-y-2 flex-1 min-w-[180px]">
-                  <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Solicitante</Label>
-                  <Select value={selectedRequester} onValueChange={setSelectedRequester}>
-                    <SelectTrigger className="w-full bg-black/40 border-white/10 h-11 rounded-xl text-white font-bold">
-                      <span className="truncate">{selectedRequester === 'all' ? 'Todos' : requesters?.find((r: any) => String(r.id) === selectedRequester)?.name || 'Todos'}</span>
-                    </SelectTrigger>
-                    <SelectContent className="bg-[#161618] border-white/10 text-white">
-                      <SelectItem value="all">Todos os Solicitantes</SelectItem>
-                      {requesters?.map((r: any) => (
-                        <SelectItem key={`req-${r.id}`} value={String(r.id)}>{r.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                    <div className="space-y-2 flex-1 min-w-[180px]">
+                      <Label className="text-[10px] font-black uppercase tracking-widest text-orange-500">Solicitante</Label>
+                      <Select value={selectedRequester} onValueChange={setSelectedRequester}>
+                        <SelectTrigger className="w-full bg-black/40 border-white/10 h-11 rounded-xl text-white font-bold">
+                          <span className="truncate">{selectedRequester === 'all' ? 'Todos' : requesters?.find((r: any) => String(r.id) === selectedRequester)?.name || 'Todos'}</span>
+                        </SelectTrigger>
+                        <SelectContent className="bg-[#161618] border-white/10 text-white">
+                          <SelectItem value="all">Todos os Solicitantes</SelectItem>
+                          {requesters?.map((r: any) => (
+                            <SelectItem key={`requester-${r.id}`} value={String(r.id)}>{r.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </>
+                )}
 
                 <Button 
                   onClick={() => setMobileFiltersOpen(false)} 

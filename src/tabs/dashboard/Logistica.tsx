@@ -6,10 +6,7 @@ import {
   PieChart, Pie, Cell, BarChart, Bar
 } from 'recharts';
 
-export interface DashboardLogisticaProps {
-  supplierData: any[];
-  paymentMethodData: any[];
-}
+import type { DashboardLogisticaProps } from './types';
 
 export function DashboardLogistica({ supplierData, paymentMethodData }: DashboardLogisticaProps) {
   return (

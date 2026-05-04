@@ -6,9 +6,7 @@ import {
   PieChart, Pie, Cell, BarChart, Bar
 } from 'recharts';
 
-export interface DashboardObrasProps {
-  buildingCostData: any[];
-}
+import type { DashboardObrasProps } from './types';
 
 export function DashboardObras({ buildingCostData }: DashboardObrasProps) {
   return (

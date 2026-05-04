@@ -32,6 +32,10 @@ class AuthResponse(BaseModel):
     user: UserResponse
 
 
+class MeResponse(BaseModel):
+    user: UserResponse
+
+
 class SummaryCard(BaseModel):
     label: str
     value: int

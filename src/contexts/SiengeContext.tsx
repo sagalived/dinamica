@@ -41,7 +41,8 @@ import {
   AreaChart, Area, Cell, PieChart, Pie, LineChart, Line, Legend
 } from 'recharts';
 
-import { sienge as api, kanbanApi, Building, User, Creditor, PurchaseOrder, PriceAlert, type AuthUser } from '../lib/api';
+import { sienge as api, kanbanApi } from '../lib/api';
+import type { AuthUser, Building, Creditor, PriceAlert, PurchaseOrder, User } from '../lib/types';
 import { cn } from '../lib/utils';
 import { fixText } from '../lib/text';
 import { calcularFluxoCaixa } from '../tabs/financeiro/leandroLogic';
@@ -95,6 +96,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState<number>(0);
   const [dataRevision, setDataRevision] = useState(0);
   const [apiStatus, setApiStatus] = useState<'online' | 'offline' | 'checking'>('checking');
   const [saldoBancario, setSaldoBancario] = useState<number | null>(null);
@@ -119,6 +121,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   const [kanbanOverview, setKanbanOverview] = useState<SprintOverview[]>([]);
   const [kanbanOverviewLoading, setKanbanOverviewLoading] = useState(false);
   const knownOrderIdsRef = useRef<Set<number>>(new Set());
+  const syncProgressTimerRef = useRef<number | null>(null);
   // Refs para acesso ao all* no fallback do filtro (sem adicionar nos deps do useEffect → evita loop)
   const allOrdersRef = useRef<PurchaseOrder[]>([]);
   const allFinancialTitlesRef = useRef<any[]>([]);
@@ -129,6 +132,33 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   
   const [alertSortConfig, setAlertSortConfig] = useState<{ key: 'date' | 'vlrUnit' | 'vlrAtual' | 'valorTotal', direction: 'asc' | 'desc' } | null>(null);
   const isRestrictedUser = sessionUser?.role === 'user';
+
+  const setSyncProgressSafe = useCallback((value: number) => {
+    const clamped = Math.max(0, Math.min(100, Math.round(value)));
+    setSyncProgress(clamped);
+  }, []);
+
+  const clearSyncProgressTimer = useCallback(() => {
+    if (syncProgressTimerRef.current != null) {
+      window.clearInterval(syncProgressTimerRef.current);
+      syncProgressTimerRef.current = null;
+    }
+  }, []);
+
+  const startLinearProgress = useCallback((from: number, to: number, durationMs: number) => {
+    clearSyncProgressTimer();
+    const startAt = Date.now();
+    const delta = to - from;
+    setSyncProgressSafe(from);
+    syncProgressTimerRef.current = window.setInterval(() => {
+      const elapsed = Date.now() - startAt;
+      const t = Math.max(0, Math.min(1, durationMs <= 0 ? 1 : elapsed / durationMs));
+      setSyncProgressSafe(from + delta * t);
+      if (t >= 1) {
+        clearSyncProgressTimer();
+      }
+    }, 120);
+  }, [clearSyncProgressTimer, setSyncProgressSafe]);
 
   const toggleSort = (key: 'date' | 'vlrUnit' | 'vlrAtual' | 'valorTotal') => {
     setAlertSortConfig(prev => {
@@ -167,6 +197,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   const [allFinancialTitles, setAllFinancialTitles] = useState<any[]>([]);
   const [receivableTitles, setReceivableTitles] = useState<any[]>([]);
   const [allReceivableTitles, setAllReceivableTitles] = useState<any[]>([]);
+  const [nfeDocuments, setNfeDocuments] = useState<any[]>([]);
   const [itemsDetailsMap, setItemsDetailsMap] = useState<Record<string, any>>({});
   const [quotationsMap, setQuotationsMap] = useState<Record<string, any>>({});
   const [latestPricesMap, setLatestPricesMap] = useState<Record<string, number>>({});
@@ -338,6 +369,12 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     const fDataRaw = Array.isArray(payload?.financeiro) ? payload.financeiro : [];
     const rDataRaw = Array.isArray(payload?.receber) ? payload.receber : [];
 
+    const cacheCounts = payload?.cacheCounts;
+    const pedidosCount = Number(cacheCounts?.pedidos ?? 0);
+    const financeiroCount = Number(cacheCounts?.financeiro ?? 0);
+    const receberCount = Number(cacheCounts?.receber ?? 0);
+    const isLightBootstrap = !!cacheCounts && rawOrdersArray.length === 0 && fDataRaw.length === 0 && rDataRaw.length === 0 && (pedidosCount > 0 || financeiroCount > 0 || receberCount > 0);
+
     const bData = bDataRaw.map((b: any) => ({
       id: b.id,
       name: fixText(b.nome || b.name || b.tradeName || b.enterpriseName || b.address || `Obra ${b.code || b.codigoVisivel || b.id}`),
@@ -373,25 +410,42 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     setCreditors(cData);
     setCompanies(compData);
 
-    const uniqueRequesters = new Map<string, User>();
-    rawOrdersArray.forEach((o: any) => {
-      const solName = fixText(String(o.solicitante || o.requesterId || o.createdBy || '')).replace(/^Comprador\s+/i, '').trim();
-      if (solName) {
-        uniqueRequesters.set(solName, { id: solName, name: solName });
-      }
-    });
-    setRequesters(Array.from(uniqueRequesters.values()));
+    if (rawOrdersArray.length > 0) {
+      const uniqueRequesters = new Map<string, User>();
+      rawOrdersArray.forEach((o: any) => {
+        const solName = fixText(String(o.solicitante || o.requesterId || o.createdBy || '')).replace(/^Comprador\s+/i, '').trim();
+        if (solName) {
+          uniqueRequesters.set(solName, { id: solName, name: solName });
+        }
+      });
+      setRequesters(Array.from(uniqueRequesters.values()));
+    }
 
     const allOData: PurchaseOrder[] = rawOrdersArray.map((o: any) => {
       const dStr = o.dataEmissao || o.data || o.date || '---';
-      const d = parseISO(dStr);
+      let dateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
+
       return {
         id: o.id || o.numero || 0,
         buildingId: o.idObra || o.codigoVisivelObra || o.buildingId || 0,
         companyId: o.companyId != null ? String(o.companyId) : undefined,
         buyerId: o.idComprador ? String(o.idComprador) : (o.codigoComprador ? String(o.codigoComprador) : (o.buyerId ? String(o.buyerId) : '0')),
         date: dStr,
-        dateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dateNumeric,
         totalAmount: parseFloat(o.valorTotal || o.totalAmount) || 0,
         supplierId: o.codigoFornecedor || o.supplierId,
         status: o.situacao || o.status || 'N/A',
@@ -403,17 +457,34 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
       };
     });
 
-    if (knownOrderIdsRef.current.size > 0) {
-      const newOrders = allOData.filter(o => !knownOrderIdsRef.current.has(o.id));
-      if (newOrders.length > 0) {
-        setNewOrderAlert(newOrders[0]);
+    if (!isLightBootstrap && allOData.length > 0) {
+      if (knownOrderIdsRef.current.size > 0) {
+        const newOrders = allOData.filter(o => !knownOrderIdsRef.current.has(o.id));
+        if (newOrders.length > 0) {
+          setNewOrderAlert(newOrders[0]);
+        }
       }
+      allOData.forEach(o => knownOrderIdsRef.current.add(o.id));
     }
-    allOData.forEach(o => knownOrderIdsRef.current.add(o.id));
 
     const allFData = fDataRaw.map((f: any) => {
       const dStr = f.dataVencimento || f.issueDate || f.dueDate || f.dataVencimentoProjetado || f.dataEmissao || f.dataContabil || '---';
-      const d = parseISO(dStr);
+      let dueDateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dueDateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dueDateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dueDateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
+
       return {
         id: f.id || f.numero || f.codigoTitulo || f.documentNumber || 0,
         buildingId: f.idObra || f.codigoObra || f.enterpriseId || f.buildingId || 0,
@@ -431,7 +502,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
           return undefined;
         })(),
         dueDate: dStr,
-        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dueDateNumeric,
         amount: parseFloat(f.totalInvoiceAmount || f.valor || f.amount || f.valorTotal || f.valorLiquido || f.valorBruto) || 0,
         status: f.situacao || f.status || 'Pendente',
         documentNumber: String(f.documentNumber || f.numeroDocumento || f.numero || f.codigoTitulo || ''),
@@ -440,7 +511,21 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
     const allRData = rDataRaw.map((r: any) => {
       const dStr = r.dataVencimento || r.data || r.date || r.dataEmissao || r.issueDate || r?.dataVencimentoProjetado || '---';
-      const d = parseISO(dStr);
+      let dueDateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dueDateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dueDateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dueDateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
       // rawValue preserva o sinal original da API Sienge (Income positivo, Expense negativo)
       const rawValue: number = r.rawValue ?? (parseFloat(r.valor ?? r.value ?? r.valorSaldo ?? r.totalInvoiceAmount ?? r.valorTotal ?? r.amount ?? 0) || 0);
       return {
@@ -459,7 +544,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
         description: fixText(r.descricao || r.historico || r.observacao || r.notes || r.description || 'Título a Receber'),
         clientName: fixText(r.nomeCliente || r.nomeFantasiaCliente || r.cliente || r.clientName || 'Extrato/Cliente'),
         dueDate: dStr,
-        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dueDateNumeric,
         amount: Math.abs(rawValue),
         rawValue,
         status: String(r.situacao || r.status || 'ABERTO').toUpperCase(),
@@ -480,13 +565,18 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
       };
     });
 
-    setItemsDetailsMap(payload?.itensPedidos || {});
-    allOrdersRef.current = allOData;
-    allFinancialTitlesRef.current = allFData;
-    allReceivableTitlesRef.current = allRData;
-    setAllOrders(allOData);
-    setAllFinancialTitles(allFData);
-    setAllReceivableTitles(allRData);
+    if (payload?.itensPedidos && Object.keys(payload.itensPedidos).length > 0) {
+      setItemsDetailsMap(payload.itensPedidos);
+    }
+
+    if (!isLightBootstrap) {
+      allOrdersRef.current = allOData;
+      allFinancialTitlesRef.current = allFData;
+      allReceivableTitlesRef.current = allRData;
+      setAllOrders(allOData);
+      setAllFinancialTitles(allFData);
+      setAllReceivableTitles(allRData);
+    }
     setSaldoBancario(typeof payload?.saldoBancario === 'number' ? payload.saldoBancario : null);
     if (payload?.latestSync) {
       setSyncInfo(payload.latestSync);
@@ -605,8 +695,27 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     const pricesMap: Record<string, number> = {};
     const baseMap: Record<string, number> = {};
 
+    const toTime = (value: any): number => {
+      const raw = String(value || '').trim();
+      if (!raw || raw === '---') return 0;
+      try {
+        const d = parseISO(raw);
+        const t = d.getTime();
+        return Number.isNaN(t) ? 0 : t;
+      } catch {
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          const t2 = d2.getTime();
+          return Number.isNaN(t2) ? 0 : t2;
+        }
+        const parsed = Date.parse(raw);
+        return Number.isNaN(parsed) ? 0 : parsed;
+      }
+    };
+
     Object.keys(historyMap).forEach(desc => {
-      const purchases = historyMap[desc].sort((a,b) => parseISO(a.date).getTime() - parseISO(b.date).getTime());
+      const purchases = historyMap[desc].sort((a, b) => toTime(a.date) - toTime(b.date));
       pricesMap[desc] = purchases[purchases.length - 1].price;
       baseMap[desc] = purchases[0].price;
     });
@@ -617,44 +726,62 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   const syncSienge = async () => {
     setSyncing(true);
     setApiStatus('checking');
+    setSyncProgressSafe(1);
     try {
-      const response = await api.post('/sync');
-      if (response.data?.latestSync) {
-        setSyncInfo(response.data.latestSync);
-        const syncDate = response.data.latestSync.finished_at || response.data.latestSync.started_at;
-        if (syncDate) {
-          const parsed = new Date(syncDate);
-          if (!Number.isNaN(parsed.getTime())) {
-            setLastUpdate(parsed);
-          }
-        }
+      // Fase 1: refresh rápido (bootstrap). O refreshData já faz /sync só se o cache estiver vazio.
+      startLinearProgress(1, 80, 45_000);
+      const refreshed = await refreshData();
+      if (!refreshed) {
+        clearSyncProgressTimer();
+        setSyncProgressSafe(0);
+        return;
       }
-      if (response.data?.in_progress) {
-        const sharedPayload = await waitForSharedCache();
-        if (sharedPayload) {
-          setDataRevision(0);
-          applyBootstrapData(sharedPayload);
-        } else {
-          await refreshData();
-        }
-      } else {
-        await refreshData();
+
+      // Fase 2: carregar dados filtrados para a UI (máx. 6 meses)
+      startLinearProgress(80, 95, 25_000);
+      try {
+        const effectiveStart = hasManualDateFilter
+          ? (startDate || null)
+          : defaultWindow.start;
+        const effectiveEnd = hasManualDateFilter
+          ? (endDate || startDate || null)
+          : defaultWindow.end;
+
+        const params: any = {
+          company_id: selectedCompany,
+          building_id: fcSelectedBuilding,
+          user_id: selectedUser,
+          requester_id: selectedRequester,
+        };
+        if (effectiveStart) params.start_date = format(effectiveStart, 'yyyy-MM-dd');
+        if (effectiveEnd) params.end_date = format(effectiveEnd, 'yyyy-MM-dd');
+
+        const filteredResp = await api.get('/filtered', { params });
+        applyServerFilteredData(filteredResp.data);
+      } catch {
+        // mantém fallback já existente no effect — não quebra o fluxo do botão
       }
+
+      clearSyncProgressTimer();
+      setSyncProgressSafe(100);
       setApiStatus('online');
     } catch (e) {
       console.error('Sync error:', e);
       setApiStatus('offline');
+      clearSyncProgressTimer();
+      setSyncProgressSafe(0);
     } finally {
       setSyncing(false);
+      window.setTimeout(() => setSyncProgressSafe(0), 450);
     }
   };
 
-  const refreshData = async () => {
+  const refreshData = async (): Promise<boolean> => {
     setLoading(true);
     const isConnected = await checkConnection();
     if (!isConnected) {
       setLoading(false);
-      return;
+      return false;
     }
 
     try {
@@ -683,11 +810,13 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
       setDataRevision(0);
       applyBootstrapData(payload);
+      return true;
     } catch (error) {
       console.error('Error refreshing data:', error);
       setOrders([]);
       setFinancialTitles([]);
       setReceivableTitles([]);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -745,18 +874,18 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
   const dateRange = useMemo(() => {
     const effectiveStartDate = hasManualDateFilter
       ? (startDate || null)
-      : (globalPeriodMode === 'last6m' ? defaultWindow.start : null);
+      : defaultWindow.start;
     const start = effectiveStartDate ? toStartOfDay(effectiveStartDate) : null;
     const effectiveEndDate = hasManualDateFilter
       ? (endDate || startDate || null)
-      : (globalPeriodMode === 'last6m' ? defaultWindow.end : null);
+      : defaultWindow.end;
     const endExclusive = effectiveEndDate ? addDays(new Date(
       effectiveEndDate.getFullYear(),
       effectiveEndDate.getMonth(),
       effectiveEndDate.getDate()
     ), 1).getTime() : null;
     return { start, endExclusive };
-  }, [defaultWindow.end, defaultWindow.start, endDate, globalPeriodMode, hasManualDateFilter, startDate, toStartOfDay]);
+  }, [defaultWindow.end, defaultWindow.start, endDate, hasManualDateFilter, startDate, toStartOfDay]);
 
   const matchesDateRange = useCallback((numericValue?: number) => {
     if (!dateRange.start && !dateRange.endExclusive) return true;
@@ -893,14 +1022,29 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
     const filteredOrdersData: PurchaseOrder[] = rawOrdersArray.map((o: any) => {
       const dStr = o.dataEmissao || o.data || o.date || '---';
-      const d = parseISO(dStr);
+      let dateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
+
       return {
         id: o.id || o.numero || 0,
         buildingId: o.idObra || o.codigoVisivelObra || o.buildingId || 0,
         companyId: o.companyId != null ? String(o.companyId) : undefined,
         buyerId: o.idComprador ? String(o.idComprador) : (o.codigoComprador ? String(o.codigoComprador) : (o.buyerId ? String(o.buyerId) : '0')),
         date: dStr,
-        dateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dateNumeric,
         totalAmount: parseFloat(o.valorTotal || o.totalAmount) || 0,
         supplierId: o.codigoFornecedor || o.supplierId,
         status: o.situacao || o.status || 'N/A',
@@ -914,7 +1058,22 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
     const filteredFinancialData = fDataRaw.map((f: any) => {
       const dStr = f.dataVencimento || f.issueDate || f.dueDate || f.dataVencimentoProjetado || f.dataEmissao || f.dataContabil || '---';
-      const d = parseISO(dStr);
+      let dueDateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dueDateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dueDateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dueDateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
+
       return {
         id: f.id || f.numero || f.codigoTitulo || f.documentNumber || 0,
         buildingId: f.idObra || f.codigoObra || f.enterpriseId || f.buildingId || 0,
@@ -932,7 +1091,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
           return undefined;
         })(),
         dueDate: dStr,
-        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dueDateNumeric,
         amount: parseFloat(f.totalInvoiceAmount || f.valor || f.amount || f.valorTotal || f.valorLiquido || f.valorBruto) || 0,
         status: f.situacao || f.status || 'Pendente',
         documentNumber: String(f.documentNumber || f.numeroDocumento || f.numero || f.codigoTitulo || ''),
@@ -941,7 +1100,21 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
     const filteredReceivableData = rDataRaw.map((r: any) => {
       const dStr = r.dataVencimento || r.data || r.date || r.dataEmissao || r.issueDate || r?.dataVencimentoProjetado || '---';
-      const d = parseISO(dStr);
+      let dueDateNumeric = 0;
+      try {
+        const d = parseISO(String(dStr));
+        dueDateNumeric = Number.isNaN(d.getTime()) ? 0 : d.getTime();
+      } catch {
+        const raw = String(dStr || '').trim();
+        const m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})/);
+        if (m) {
+          const d2 = new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+          dueDateNumeric = Number.isNaN(d2.getTime()) ? 0 : d2.getTime();
+        } else {
+          const parsed = Date.parse(raw);
+          dueDateNumeric = Number.isNaN(parsed) ? 0 : parsed;
+        }
+      }
       const rawValue: number = r.rawValue ?? (parseFloat(r.valor ?? r.value ?? r.valorSaldo ?? r.totalInvoiceAmount ?? r.valorTotal ?? r.amount ?? 0) || 0);
       return {
         id: r.id || r.numero || r.numeroTitulo || r.codigoTitulo || r.documentNumber || 0,
@@ -959,7 +1132,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
         description: fixText(r.descricao || r.historico || r.observacao || r.notes || r.description || 'Título a Receber'),
         clientName: fixText(r.nomeCliente || r.nomeFantasiaCliente || r.cliente || r.clientName || 'Extrato/Cliente'),
         dueDate: dStr,
-        dueDateNumeric: isNaN(d.getTime()) ? 0 : d.getTime(),
+        dueDateNumeric,
         amount: Math.abs(rawValue),
         rawValue,
         status: String(r.situacao || r.status || 'ABERTO').toUpperCase(),
@@ -1045,23 +1218,26 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     const runServerSideFiltering = async () => {
+      const effectiveStart = hasManualDateFilter
+        ? (startDate || null)
+        : defaultWindow.start;
+      const effectiveEnd = hasManualDateFilter
+        ? (endDate || startDate || null)
+        : defaultWindow.end;
+
+      // O endpoint de NF-e exige startDate/endDate. Mesmo que o modo global seja
+      // “total”, usamos a janela padrão (últimos 6 meses) quando o usuário não
+      // escolheu datas manualmente.
+      const nfeStart = effectiveStart || defaultWindow.start;
+      const nfeEnd = effectiveEnd || defaultWindow.end;
+
       try {
-        const isLeandroTab = activeTab === 'financeiro-leandro';
         const params: any = {
           company_id: selectedCompany,
+          building_id: fcSelectedBuilding,
           user_id: selectedUser,
           requester_id: selectedRequester,
         };
-        const effectiveStart = isLeandroTab
-          ? null
-          : (hasManualDateFilter
-              ? (startDate || null)
-              : (globalPeriodMode === 'last6m' ? defaultWindow.start : null));
-        const effectiveEnd = isLeandroTab
-          ? null
-          : (hasManualDateFilter
-              ? (endDate || startDate || null)
-              : (globalPeriodMode === 'last6m' ? defaultWindow.end : null));
         if (effectiveStart) params.start_date = format(effectiveStart, 'yyyy-MM-dd');
         if (effectiveEnd) params.end_date = format(effectiveEnd, 'yyyy-MM-dd');
 
@@ -1073,29 +1249,79 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
         if (cancelled) return;
         // Fallback local se endpoint /filtered estiver indisponível.
         // Usa refs (não estado) para não re-disparar o effect → evita loop.
+
+        const buildingPasses = (value: any): boolean => {
+          if (fcSelectedBuilding === 'all') return true;
+          const current = String(value?.buildingId ?? value?.idObra ?? value?.codigoObra ?? value?.buildingCode ?? '');
+          if (!current) return false;
+          if (current === fcSelectedBuilding) return true;
+          const selected = buildings.find((b: any) => String(b.id) === fcSelectedBuilding);
+          if (!selected) return false;
+          return String(selected.code ?? '') === current;
+        };
+
         const filteredOrders = allOrdersRef.current.filter((o) => {
           const inDate = matchesDateRange(o.dateNumeric);
           const inBuilding = matchesCompanyFilter(o.buildingId, (o as any).companyId);
+          const inSelectedBuilding = buildingPasses(o);
           const inUser = selectedUser === 'all' || String(o.buyerId) === selectedUser;
           const inRequester = selectedRequester === 'all' || String(o.requesterId) === selectedRequester || o.requesterId === selectedRequester;
-          return inDate && inBuilding && inUser && inRequester;
+          return inDate && inBuilding && inSelectedBuilding && inUser && inRequester;
         }).sort((a, b) => (b.dateNumeric || 0) - (a.dateNumeric || 0));
 
         const filteredFinancial = allFinancialTitlesRef.current.filter((f) => {
           const inDate = matchesDateRange(f.dueDateNumeric);
           const inBuilding = matchesCompanyFilter(f.buildingId, f.companyId);
-          return inDate && inBuilding;
+          return inDate && inBuilding && buildingPasses(f);
         });
 
         const filteredReceivable = allReceivableTitlesRef.current.filter((r) => {
           const inDate = matchesDateRange(r.dueDateNumeric);
           const inBuilding = matchesCompanyFilter(r.buildingId, r.companyId);
-          return inDate && inBuilding;
+          return inDate && inBuilding && buildingPasses(r);
         });
 
         setOrders(filteredOrders);
         setFinancialTitles(filteredFinancial);
         setReceivableTitles(filteredReceivable);
+      }
+
+      // NF-e (Receita Operacional): busca independente do /filtered.
+      // - Filtra por empresa quando selecionada.
+      // - Quando apenas a obra é selecionada, tenta usar companyId da obra.
+      try {
+        const normalizeResults = (payload: any): any[] => {
+          if (!payload) return [];
+          if (Array.isArray(payload)) return payload;
+          if (Array.isArray(payload?.results)) return payload.results;
+          if (Array.isArray(payload?.data?.results)) return payload.data.results;
+          if (Array.isArray(payload?.data)) return payload.data;
+          return [];
+        };
+
+        const selectedCompanyId = selectedCompany !== 'all' ? parseInt(selectedCompany, 10) : null;
+        const selectedBuildingCompanyId = (() => {
+          if (fcSelectedBuilding === 'all') return null;
+          const b = buildings.find((x: any) => String(x.id) === fcSelectedBuilding);
+          const cid = b?.companyId ?? b?.company_id;
+          return cid ? parseInt(String(cid), 10) : null;
+        })();
+
+        const companyId = selectedCompanyId ?? selectedBuildingCompanyId;
+
+        const nfeParams: any = {
+          startDate: format(nfeStart, 'yyyy-MM-dd'),
+          endDate: format(nfeEnd, 'yyyy-MM-dd'),
+          limit: 200,
+          offset: 0,
+        };
+        if (companyId && !isNaN(companyId)) nfeParams.companyId = companyId;
+
+        const nfeResponse = await api.get('/nfe/documents', { params: nfeParams });
+        const results = normalizeResults(nfeResponse.data);
+        if (!cancelled) setNfeDocuments(results);
+      } catch {
+        if (!cancelled) setNfeDocuments([]);
       }
     };
 
@@ -1110,7 +1336,9 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     dataRevision,
     defaultWindow.end,
     defaultWindow.start,
+    buildings,
     endDate,
+    fcSelectedBuilding,
     globalPeriodMode,
     hasManualDateFilter,
     matchesCompanyFilter,
@@ -1551,7 +1779,7 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
 
 
   const contextValue = {
-    loading, syncing, dataRevision, apiStatus, saldoBancario, lastUpdate, syncInfo,
+    loading, syncing, syncProgress, dataRevision, apiStatus, saldoBancario, lastUpdate, syncInfo,
     startDate, setStartDate, endDate, setEndDate,
     fcStartDate, setFcStartDate, fcEndDate, setFcEndDate, fcPeriodMode, setFcPeriodMode,
     fcSelectedCompany, setFcSelectedCompany, fcSelectedBuilding, setFcSelectedBuilding, fcHideInternal, setFcHideInternal,
@@ -1563,12 +1791,15 @@ export function SiengeProvider({ children }: { children: React.ReactNode }) {
     companies, setCompanies, orders, setOrders, allOrders, setAllOrders, priceAlerts, setPriceAlerts,
     financialTitles, setFinancialTitles, allFinancialTitles, setAllFinancialTitles,
     receivableTitles, setReceivableTitles, allReceivableTitles, setAllReceivableTitles,
+    nfeDocuments, setNfeDocuments,
     itemsDetailsMap, setItemsDetailsMap, quotationsMap, setQuotationsMap,
     latestPricesMap, setLatestPricesMap, baselinePricesMap, setBaselinePricesMap,
     globalItemHistory, selectedMapBuilding, setSelectedMapBuilding, buildingSearch, setBuildingSearch,
     editingEngineer, setEditingEngineer, engineerDraft, setEngineerDraft, savingEngineer, setSavingEngineer,
     selectedCompany, setSelectedCompany, selectedUser, setSelectedUser, selectedRequester, setSelectedRequester,
-    globalPeriodMode, setGlobalPeriodMode, syncSienge: fetchInitialData
+    globalPeriodMode, setGlobalPeriodMode,
+    activeBuildingCount,
+    syncSienge
   };
 
   return (

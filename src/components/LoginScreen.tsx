@@ -1,6 +1,7 @@
 import { type FormEvent, useState } from 'react';
 import { Eye, EyeOff, LogIn, Moon, Sun } from 'lucide-react';
-import { authApi, setAuthToken, setSessionUser, type AuthUser } from '../lib/api';
+import { authApi, setAuthToken, setSessionUser } from '../lib/api';
+import type { AuthUser } from '../lib/types';
 import logoWordmark from '../assets/dinamica-wordmark.svg';
 import logoWordmarkDark from '../assets/dinamica-wordmark-dark.svg';
 import { cn } from '../lib/utils';

@@ -6,10 +6,7 @@ import {
   PieChart, Pie, Cell, BarChart, Bar
 } from 'recharts';
 
-export interface DashboardFinanceiroProps {
-  cashFlowData: any[];
-  financeBalanceData: any[];
-}
+ import type { DashboardFinanceiroProps } from './types';
 
 export function DashboardFinanceiro({ cashFlowData, financeBalanceData }: DashboardFinanceiroProps) {
   return (
@@ -23,7 +20,11 @@ export function DashboardFinanceiro({ cashFlowData, financeBalanceData }: Dashbo
                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#ffffff05" />
                 <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{fill: '#666', fontSize: 12}} />
                 <YAxis axisLine={false} tickLine={false} tick={{fill: '#666', fontSize: 12}} tickFormatter={(v) => `R$${v/1000}k`} />
-                <Tooltip cursor={{fill: '#ffffff05'}} formatter={(value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)} contentStyle={{ backgroundColor: '#161618', border: 'none' }} />
+                <Tooltip
+                  cursor={{fill: '#ffffff05'}}
+                  formatter={(value: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value ?? 0))}
+                  contentStyle={{ backgroundColor: '#161618', border: 'none' }}
+                />
                 <Legend />
                 <Bar dataKey="despesa" name="Despesas" fill="#ef4444" radius={[4, 4, 0, 0]} />
                 <Bar dataKey="receita" name="Receitas" fill="#22c55e" radius={[4, 4, 0, 0]} />
@@ -40,7 +41,10 @@ export function DashboardFinanceiro({ cashFlowData, financeBalanceData }: Dashbo
                   <Cell fill="#10b981" />
                   <Cell fill="#f59e0b" />
                 </Pie>
-                <Tooltip formatter={(value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value)} contentStyle={{ backgroundColor: '#161618', border: 'none' }} />
+                <Tooltip
+                  formatter={(value: any) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(Number(value ?? 0))}
+                  contentStyle={{ backgroundColor: '#161618', border: 'none' }}
+                />
                 <Legend />
               </PieChart>
             </ResponsiveContainer>
